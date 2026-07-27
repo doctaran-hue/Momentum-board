@@ -23,7 +23,7 @@ import pandas as pd
 
 
 # ====================================================================
-# ENGINE - base segmentation and stage counting
+# ENGINE
 # ====================================================================
 # ----------------------------------------------------------------------
 # Indicators
@@ -343,7 +343,7 @@ def base_metrics(df, open_base):
 
 
 # ====================================================================
-# QUALITY GATES and the confound test
+# QUALITY GATES + CONFOUND TEST
 # ====================================================================
 # Which flags are HARD gates. Anything here must pass for tier == "PASS".
 HARD_GATES = ["q_ranges", "q_volume", "q_contract"]
@@ -557,7 +557,12 @@ LATEST = os.path.join(DATA, "latest.json")
 
 # ---- knobs -------------------------------------------------------------
 YEARS = 12
+BENCH = "^NSEI"              # Nifty 50, for relative-strength and regime
 RS_LONG, RS_SHORT = 123, 55
+RS_TREND_LOOKBACK = 21       # sessions back, for RS rising/falling
+RS_TREND_BAND = 5.0          # percentile points that count as a real move
+DD_DROP = 0.002              # index down >0.2% = candidate distribution day
+DD_WINDOW = 25               # trailing sessions for the distribution count
 RS_LEADER_PCTL = 90          # top decile counts as a leader
 BASE_CFG = dict(min_len=25, min_depth=0.08, max_depth=0.35,
                 min_advance=0.20, below_days=126, dd_thresh=0.50)
@@ -598,28 +603,118 @@ JSWINFRA GPIL LLOYDSME SHYAMMETL"""
 
 
 # ----------------------------------------------------------------------
+# Sector map for the built-in universe. A universe.csv with an Industry column
+# overrides this entirely, which is the better route for a large universe.
+SECTORS = {}
+_SEC_RAW = {
+ "Financials": """HDFCBANK ICICIBANK SBIN KOTAKBANK AXISBANK BAJFINANCE BAJAJFINSV INDUSINDBK
+   BANKBARODA PNB CANBK IDFCFIRSTB FEDERALBNK AUBANK BANDHANBNK CHOLAFIN MUTHOOTFIN LTF
+   SHRIRAMFIN ICICIGI ICICIPRULI MFSL SBILIFE HDFCLIFE LICI CDSL BSE MCX ANGELONE IEX
+   KFINTECH POLICYBZR PAYTM""",
+ "Information Technology": """TCS INFY HCLTECH WIPRO TECHM LTIM PERSISTENT COFORGE MPHASIS
+   KPITTECH TATAELXSI CYIENT OFSS ZENSARTECH SONATSOFTW""",
+ "Oil Gas & Consumable Fuels": """RELIANCE ONGC BPCL IOC GAIL PETRONET GUJGASLTD MGL IGL
+   GSPL AEGISCHEM COALINDIA""",
+ "Fast Moving Consumer Goods": """HINDUNILVR ITC NESTLEIND BRITANNIA DABUR GODREJCP MARICO
+   COLPAL EMAMILTD TATACONSUM VBL RADICO UBL MCDOWELL-N SULA JYOTHYLAB HONASA GODFRYPHLP
+   VSTIND KRBL AVANTIFEED GODREJAGRO""",
+ "Healthcare": """SUNPHARMA CIPLA DRREDDY DIVISLAB TORNTPHARM ALKEM LUPIN AUROPHARMA BIOCON
+   ZYDUSLIFE GLENMARK IPCALAB LAURUSLABS SYNGENE ABBOTINDIA PFIZER GLAXO SANOFI ASTRAZEN
+   MANKIND JBCHEPHARM ERIS AJANTPHARM NATCOPHARM GRANULES CAPLIPOINT POLYMED APOLLOHOSP
+   MAXHEALTH FORTIS NH KIMS ASTERDM METROPOLIS LALPATHLAB""",
+ "Automobile & Components": """MARUTI TATAMOTORS M&M BAJAJ-AUTO HEROMOTOCO EICHERMOT TVSMOTOR
+   ASHOKLEY BALKRISIND MRF APOLLOTYRE BHARATFORG SONACOMS MOTHERSON BOSCHLTD EXIDEIND
+   TIINDIA""",
+ "Capital Goods": """LT SIEMENS ABB THERMAX BHEL CUMMINSIND AIAENG GRINDWELL SCHAEFFLER
+   POLYCAB KEI CGPOWER TIMKEN CARBORUNIV ELGIEQUIP KIRLOSENG KIRLOSBROS BLUESTARCO VOLTAS
+   WHIRLPOOL CROMPTON VGUARD DIXON AMBER KAYNES SYRMA HAVELLS""",
+ "Metals & Mining": """TATASTEEL JSWSTEEL HINDALCO VEDL JINDALSTEL SAIL NMDC NATIONALUM JSL
+   APLAPOLLO RATNAMANI WELCORP GPIL LLOYDSME SHYAMMETL""",
+ "Chemicals": """PIDILITIND UPL TATACHEM DEEPAKNTR PIIND SRF NAVINFLUOR AARTIIND ATUL
+   VINATIORGA FLUOROCHEM CLEAN GALAXYSURF SUDARSCHEM CHAMBLFERT COROMANDEL RALLIS""",
+ "Construction Materials": """ULTRACEMCO GRASIM SHREECEM AMBUJACEM KAJARIACER CERA
+   SUPREMEIND ASTRAL FINPIPE PRINCEPIPE""",
+ "Realty": """DLF LODHA OBEROIRLTY GODREJPROP PRESTIGE PHOENIXLTD BRIGADE SOBHA SUNTECK
+   ANANTRAJ""",
+ "Power": """NTPC POWERGRID ADANIPOWER TATAPOWER TORNTPOWER JSWENERGY NHPC SJVN""",
+ "Services": """ADANIENT ADANIPORTS INDIGO IRCTC CONCOR GESHIP JSWINFRA DMART TRENT ABFRL
+   PAGEIND JUBLFOOD DEVYANI WESTLIFE INDHOTEL CHALET LEMONTREE EIHOTEL INDIAMART NAUKRI
+   NYKAA ZOMATO""",
+ "Telecommunication": """BHARTIARTL""",
+ "Consumer Durables": """TITAN ASIANPAINT""",
+ "Capital Goods - Defence": """BEL HAL BDL MAZDOCK COCHINSHIP GRSE DATAPATTNS ZENTEC""",
+}
+for _sec, _names in _SEC_RAW.items():
+    for _n in _names.split():
+        SECTORS[_n] = _sec
+
+
+def load_universe_file():
+    """
+    A universe.csv / universe.txt committed to the repo wins over everything.
+    This is the reliable route to a large universe: NSE blocks datacenter IPs,
+    so the live fetch usually fails from GitHub Actions, but YOUR browser can
+    download the constituent CSV fine. Accepts either:
+        symbol            (one per line, .txt or single-column .csv)
+        Symbol,Industry   (the NSE constituent CSV, unmodified)
+    """
+    for name in ("universe.csv", "universe.txt"):
+        p = os.path.join(HERE, name)
+        if not os.path.exists(p):
+            continue
+        try:
+            if name.endswith(".txt"):
+                syms = [l.strip().upper() for l in open(p) if l.strip()]
+                sec = {}
+            else:
+                df = pd.read_csv(p)
+                cols = {str(c).strip().lower(): c for c in df.columns}
+                scol = cols.get("symbol") or list(df.columns)[0]
+                icol = cols.get("industry") or cols.get("sector")
+                syms = df[scol].astype(str).str.strip().str.upper().tolist()
+                sec = (dict(zip(syms, df[icol].astype(str).str.strip()))
+                       if icol else {})
+            syms = [x for x in syms if x and x != "NAN"]
+            if len(syms) >= 20:
+                print(f"universe from {name}: {len(syms)} symbols"
+                      f"{' with sectors' if sec else ''}")
+                return syms, sec
+        except Exception as e:
+            print(f"  could not read {name}: {type(e).__name__}")
+    return None, {}
+
+
 def universe():
+    syms, sec = load_universe_file()
+    if syms:
+        return syms, sec
     import io
     try:
         import requests
         hdr = {"User-Agent": "Mozilla/5.0"}
-        for u in ("https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv",
-                  "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"):
+        for u in (
+            "https://nsearchives.nseindia.com/content/indices/ind_niftytotalmarket_list.csv",
+            "https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv",
+            "https://archives.nseindia.com/content/indices/ind_nifty500list.csv",
+        ):
             try:
                 r = requests.get(u, headers=hdr, timeout=8)
                 r.raise_for_status()
-                s = pd.read_csv(io.StringIO(r.text))["Symbol"]
-                s = s.astype(str).str.strip().tolist()
-                if len(s) > 100:
-                    print(f"NSE list: {len(s)} symbols")
-                    return s
+                df = pd.read_csv(io.StringIO(r.text))
+                sy = df["Symbol"].astype(str).str.strip().str.upper().tolist()
+                sc = {}
+                if "Industry" in df.columns:
+                    sc = dict(zip(sy, df["Industry"].astype(str).str.strip()))
+                if len(sy) > 100:
+                    print(f"NSE list: {len(sy)} symbols from {u.split('/')[-1]}")
+                    return sy, sc
             except Exception as e:
-                print(f"  NSE list failed ({type(e).__name__})")
+                print(f"  NSE fetch failed ({type(e).__name__})")
     except ImportError:
         pass
-    s = sorted(set(FALLBACK.split()))
-    print(f"built-in list: {len(s)} symbols")
-    return s
+    sy = sorted(set(FALLBACK.split()))
+    print(f"built-in list: {len(sy)} symbols (commit universe.csv for more)")
+    return sy, dict(SECTORS)
 
 
 def fetch(symbols, batch=40, pause=1.0):
@@ -646,6 +741,25 @@ def fetch(symbols, batch=40, pause=1.0):
             panel[t[:-3]] = add_indicators(d[["Open", "High", "Low", "Close", "Volume"]])
         time.sleep(pause)
     return panel
+
+
+def fetch_bench():
+    """Nifty 50 close series, for relative strength and the regime count."""
+    import yfinance as yf
+    try:
+        b = yf.download(BENCH, period=f"{YEARS}y", interval="1d",
+                        auto_adjust=True, progress=False)
+        if isinstance(b.columns, pd.MultiIndex):
+            b.columns = b.columns.get_level_values(0)
+        b = b.dropna(subset=["Close"])
+        if len(b) < 300:
+            print("  benchmark too short; relative columns will be blank")
+            return None
+        print(f"benchmark {BENCH}: {len(b)} sessions")
+        return b
+    except Exception as e:
+        print(f"  benchmark fetch failed ({type(e).__name__})")
+        return None
 
 
 def demo_panel(n=90, seed=4):
@@ -688,6 +802,117 @@ def demo_panel(n=90, seed=4):
 
 
 # ----------------------------------------------------------------------
+def ret_over(c, lb):
+    if len(c) < lb + 1:
+        return np.nan
+    return float(c.iloc[-1] / c.iloc[-lb - 1] - 1)
+
+
+def vs_bench(c, bench_c, lb):
+    """
+    Excess return in percentage points over the benchmark.
+    This is the plain-language 'how much stronger than Nifty' number: a value
+    of +18 means the stock beat the Nifty by 18 percentage points over the
+    window. Distinct from the percentile, which only says where it ranks.
+    """
+    a, b = ret_over(c, lb), ret_over(bench_c, lb)
+    if not (np.isfinite(a) and np.isfinite(b)):
+        return np.nan
+    return float((a - b) * 100)
+
+
+def mansfield(c, bench_c, lb):
+    """
+    Mansfield relative strength: the stock/index ratio measured against its own
+    moving average, zero-centred. Above zero = outperforming its recent norm.
+    Reads as a trend in leadership rather than a level.
+    """
+    n = min(len(c), len(bench_c))
+    if n < lb + 5:
+        return np.nan
+    idx = c.index.intersection(bench_c.index)
+    if len(idx) < lb + 5:
+        return np.nan
+    rs = (c.reindex(idx) / bench_c.reindex(idx)).dropna()
+    if len(rs) < lb + 5:
+        return np.nan
+    ma = rs.rolling(lb).mean()
+    if not np.isfinite(ma.iloc[-1]) or ma.iloc[-1] == 0:
+        return np.nan
+    return float((rs.iloc[-1] / ma.iloc[-1] - 1) * 100)
+
+
+def rs_score_at(df, lb, offset=0):
+    """Vol-adjusted RS as it stood `offset` sessions ago."""
+    c = df["Close"]
+    if offset:
+        c = c.iloc[:-offset]
+    if len(c) < lb + 5:
+        return np.nan
+    ret = c.iloc[-1] / c.iloc[-lb] - 1
+    vol = c.pct_change().iloc[-lb:].std() * np.sqrt(252)
+    return np.nan if (not np.isfinite(vol) or vol <= 0) else ret / vol
+
+
+def trend_label(delta_pp, band=None):
+    band = RS_TREND_BAND if band is None else band
+    if not np.isfinite(delta_pp):
+        return "—"
+    if delta_pp >= band:
+        return "RISING"
+    if delta_pp <= -band:
+        return "FALLING"
+    return "FLAT"
+
+
+def market_regime(bench, panel):
+    """
+    O'Neil distribution-day count on the Nifty.
+
+    Index volume is unreliable from the vendor, so the volume series is the sum
+    of constituent turnover across the panel - the same construction specced
+    for the standalone test. A distribution day is the index closing down more
+    than DD_DROP on turnover above the prior session, which is institutional
+    selling occurring while the index still looks fine.
+    """
+    if bench is None or not panel:
+        return None
+    tov = None
+    for d in panel.values():
+        t = (d["Close"] * d["Volume"]).rename("t")
+        tov = t if tov is None else tov.add(t, fill_value=0.0)
+    if tov is None:
+        return None
+    idx = bench.index.intersection(tov.index)
+    if len(idx) < DD_WINDOW + 5:
+        return None
+    c = bench["Close"].reindex(idx)
+    v = tov.reindex(idx)
+    chg = c.pct_change()
+    dd = (chg <= -DD_DROP) & (v > v.shift(1))
+    count = int(dd.iloc[-DD_WINDOW:].sum())
+    days = [str(d.date()) for d in dd.iloc[-DD_WINDOW:][dd.iloc[-DD_WINDOW:]].index]
+    state = ("HEAVY" if count >= 5 else "ELEVATED" if count >= 3 else "LIGHT")
+    hi = float(c.iloc[-252:].max()) if len(c) >= 252 else float(c.max())
+    return dict(
+        distribution_days=count, window=DD_WINDOW, state=state, dates=days,
+        index_close=round(float(c.iloc[-1]), 1),
+        index_chg=round(float(chg.iloc[-1]) * 100, 2),
+        off_high=round((float(c.iloc[-1]) / hi - 1) * 100, 1),
+    )
+
+
+def demo_bench(panel):
+    """Synthetic Nifty for demo mode: equal-weight mean of the panel."""
+    if not panel:
+        return None
+    df = pd.DataFrame({k: v["Close"] for k, v in panel.items()}).dropna(how="all")
+    c = df.mean(axis=1)
+    v = pd.Series(np.random.default_rng(7).integers(2e8, 4e8, len(c)),
+                  index=c.index, dtype=float)
+    return pd.DataFrame({"Close": c, "Volume": v})
+
+
 def rs_score(df, lb):
     c = df["Close"]
     if len(c) < lb + 5:
@@ -711,11 +936,22 @@ def quadrant(long_p, short_p, cut=RS_LEADER_PCTL):
     return "LAGGARD"
 
 
-def build_rows(panel):
+def build_rows(panel, bench=None, sectors=None):
+    sectors = sectors or {}
+    bc = bench["Close"] if bench is not None else None
+
     sl = pd.Series({s: rs_score(d, RS_LONG) for s, d in panel.items()}).dropna()
     ss = pd.Series({s: rs_score(d, RS_SHORT) for s, d in panel.items()}).dropna()
-    pl = (sl.rank(pct=True) * 100).round(1)
-    ps = (ss.rank(pct=True) * 100).round(1)
+    # Rank descending-safe and cap below 100: with N names a true percentile
+    # cannot be 100, and showing 100 for the top few is misleading.
+    pl = (sl.rank(pct=True) * 100).clip(upper=99.9).round(1)
+    ps = (ss.rank(pct=True) * 100).clip(upper=99.9).round(1)
+
+    # RS percentile as it stood RS_TREND_LOOKBACK sessions ago, so the trend is
+    # a genuine cross-sectional move rather than just the stock's own drift.
+    slp = pd.Series({s: rs_score_at(d, RS_LONG, RS_TREND_LOOKBACK)
+                     for s, d in panel.items()}).dropna()
+    plp = (slp.rank(pct=True) * 100).clip(upper=99.9).round(1)
 
     rows = {}
     for s, d in panel.items():
@@ -729,10 +965,21 @@ def build_rows(panel):
         chg = float(px / c.iloc[-2] - 1) * 100 if len(c) > 1 else 0.0
         tov = float((d["Close"] * d["Volume"]).iloc[-60:].median()) / 1e7
         lp, sp = float(pl.get(s, np.nan)), float(ps.get(s, np.nan))
+        lpp = float(plp.get(s, np.nan))
+        d_rs = lp - lpp if (np.isfinite(lp) and np.isfinite(lpp)) else np.nan
+        v123 = vs_bench(c, bc, RS_LONG) if bc is not None else np.nan
+        v55 = vs_bench(c, bc, RS_SHORT) if bc is not None else np.nan
+        mans = mansfield(c, bc, RS_LONG) if bc is not None else np.nan
 
         row = dict(symbol=s, price=round(px, 1), chg=round(chg, 2),
+                   sector=sectors.get(s) or "Unclassified",
                    rs_long=None if np.isnan(lp) else lp,
                    rs_short=None if np.isnan(sp) else sp,
+                   vs_nifty_long=None if not np.isfinite(v123) else round(v123, 1),
+                   vs_nifty_short=None if not np.isfinite(v55) else round(v55, 1),
+                   mansfield=None if not np.isfinite(mans) else round(mans, 1),
+                   rs_delta=None if not np.isfinite(d_rs) else round(d_rs, 1),
+                   rs_trend=trend_label(d_rs),
                    quad=quadrant(lp, sp), stage2=bool(g),
                    stage2_fails=[k for k, v in checks.items() if not v],
                    next_base=int(res["next_base_number"]),
@@ -769,6 +1016,30 @@ def build_rows(panel):
                            flags={k: bool(q[k]) for k in ALL_FLAGS})
         rows[s] = row
     return rows
+
+
+def sector_summary(rows, leaders_long, leaders_short):
+    """
+    Counts per sector: how many names exist, how many lead on each horizon, and
+    the share leading. Share matters more than the raw count - a sector with 8
+    names and 5 leaders is doing something a 35-name sector with 6 is not.
+    """
+    from collections import Counter
+    tot = Counter(r["sector"] for r in rows.values())
+    ll = Counter(r["sector"] for r in leaders_long)
+    ls = Counter(r["sector"] for r in leaders_short)
+    med = {}
+    for sec in tot:
+        vals = [r["vs_nifty_long"] for r in rows.values()
+                if r["sector"] == sec and r["vs_nifty_long"] is not None]
+        med[sec] = round(float(np.median(vals)), 1) if vals else None
+    out = []
+    for sec, n in tot.items():
+        out.append(dict(sector=sec, n=n, rs_long=ll.get(sec, 0),
+                        rs_short=ls.get(sec, 0),
+                        share=round(100.0 * ll.get(sec, 0) / n, 1) if n else 0.0,
+                        median_vs_nifty=med.get(sec)))
+    return sorted(out, key=lambda x: (-x["rs_long"], -x["share"]))
 
 
 def base_candidates(rows, target=2):
@@ -864,13 +1135,20 @@ def main():
     if a.demo:
         print("DEMO MODE - synthetic data")
         panel = demo_panel()
+        sectors = dict(SECTORS)
+        bench = demo_bench(panel)
     else:
-        panel = fetch(universe())
+        syms, sectors = universe()
+        panel = fetch(syms)
+        bench = fetch_bench()
+        if not sectors:
+            sectors = dict(SECTORS)
     if not panel:
         sys.exit("no data fetched")
     print(f"panel: {len(panel)} symbols")
 
-    rows = build_rows(panel)
+    rows = build_rows(panel, bench, sectors)
+    regime = market_regime(bench, panel)
     as_of = max(d.index[-1] for d in panel.values()).date().isoformat()
 
     leaders_long = sorted([r for r in rows.values()
@@ -880,6 +1158,7 @@ def main():
                            if (r["rs_short"] or 0) >= RS_LEADER_PCTL],
                            key=lambda r: -r["rs_short"])
     base_rows = base_candidates(rows, a.target_base)
+    sectors_out = sector_summary(rows, leaders_long, leaders_short)
 
     # dict(r) per list: build_rows returns one object per symbol, and all three
     # lists reference the same objects, so per-list days_in/delta must not share.
@@ -935,7 +1214,8 @@ def main():
                     new=len(lists["new"]), base=len(base_rows),
                     base_pass=tiers.get("PASS", 0), base_near=tiers.get("NEAR", 0),
                     base_fail=tiers.get("FAIL", 0)),
-        exits=exits, confound=confound,
+        exits=exits, confound=confound, regime=regime,
+        sectors=sectors_out,
         base_dist={str(k): int(v) for k, v in
                    pd.Series([r["next_base"] for r in rows.values()
                               if r["in_base"]]).value_counts().sort_index().items()},
@@ -955,6 +1235,13 @@ def main():
           f"(PASS {tiers.get('PASS',0)} / NEAR {tiers.get('NEAR',0)} / "
           f"FAIL {tiers.get('FAIL',0)})")
     print(f"  confound      : {confound.get('verdict')}")
+    if regime:
+        print(f"  distribution  : {regime['distribution_days']} in "
+              f"{regime['window']} sessions -> {regime['state']}"
+              f"  (Nifty {regime['off_high']}% off high)")
+    print("  top sectors   : " + ", ".join(
+        f"{x['sector'].split()[0]} {x['rs_long']}/{x['n']}"
+        for x in sectors_out[:5]))
     print(f"wrote {LATEST}")
 
 
