@@ -520,10 +520,15 @@ load().then(d=>{
     (d.demo?`<span class="demo">demo data</span>`:"");
   vitals(d); regime(d); tabs(); board();
   document.getElementById("foot").innerHTML =
-    `RS = return ÷ realised volatility, percentile-ranked across ${d.universe} names. ` +
-    `Leader threshold ${d.params.leader_pctl}th pctl. ` +
-    `Gates: range_contraction &lt; ${d.params.range_max}, vol_dryup &lt; ${d.params.vol_max}. ` +
-    `Candidate generator — no forward-return validation has been done.`;
+    `RS = volatility-adjusted <b>excess</b> return vs Nifty over ${d.params.rs_long} ` +
+    `sessions; above zero means outperforming the index. ` +
+    `ARS = outperformance since the anchor (the last Nifty 200-EMA breakdown). ` +
+    `Proximity gates ${Math.round(d.params.prox_main*100)}% main / ` +
+    `${Math.round(d.params.prox_emerging*100)}% emerging. ` +
+    `Base gates: range_contraction &lt; ${d.params.range_max}, ` +
+    `vol_dryup &lt; ${d.params.vol_max}. ` +
+    `Fake movers excluded (top-3 up days &gt; 50% of the up-move). ` +
+    `Candidate generator \u2014 no forward-return validation has been done.`;
 }).catch(e=>{
   document.getElementById("board").innerHTML =
     `<div class="empty"><b>No scan data yet.</b>The board reads
@@ -534,4 +539,3 @@ load().then(d=>{
 </script>
 </body>
 </html>
-
