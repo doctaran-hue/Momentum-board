@@ -1,1 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NSE Momentum Board</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --paper:#E9EDF1; --card:#FFF; --ink:#0E1720; --ink2:#4A5A68; --ink3:#7C8B98;
+  --rule:#C4CFD8; --rule2:#DDE4EA;
+  --pass:#0B6E4F; --near:#8A6A00; --fail:#7A2E2E; --mark:#2B50C8;
+  --up:#0B6E4F; --dn:#7A2E2E;
+  --mono:"IBM Plex Mono",ui-monospace,monospace;
+  --cond:"IBM Plex Sans Condensed",system-ui,sans-serif;
+  --sans:"IBM Plex Sans",system-ui,sans-serif;
+  --rail:26px;
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{
+  background:var(--paper); color:var(--ink); font-family:var(--sans);
+  font-size:14px; line-height:1.45;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1180px;margin:0 auto;padding:0 16px 72px}
+
+/* ---------- masthead ---------- */
+header{padding:28px 0 0}
+.eyebrow{
+  font-family:var(--cond); font-weight:600; font-size:11px;
+  letter-spacing:.14em; text-transform:uppercase; color:var(--ink3);
+}
+h1{
+  font-family:var(--cond); font-weight:700; font-size:clamp(26px,5vw,40px);
+  letter-spacing:-.01em; margin:2px 0 0; line-height:1.05;
+}
+.stamp{
+  display:flex; flex-wrap:wrap; gap:8px 18px; align-items:baseline;
+  margin-top:10px; font-family:var(--mono); font-size:12px; color:var(--ink2);
+}
+.demo{
+  font-family:var(--cond); font-weight:700; font-size:11px; letter-spacing:.1em;
+  text-transform:uppercase; color:#fff; background:var(--near);
+  padding:2px 7px; border-radius:2px;
+}
+
+/* ---------- vitals ---------- */
+.vitals{
+  margin-top:20px; border-top:2px solid var(--ink); border-bottom:1px solid var(--rule);
+  display:grid; grid-template-columns:repeat(auto-fit,minmax(104px,1fr));
+}
+.vital{padding:12px 14px 13px; border-right:1px solid var(--rule2)}
+.vital:last-child{border-right:0}
+.vital .k{
+  font-family:var(--cond); font-size:10px; font-weight:600; letter-spacing:.11em;
+  text-transform:uppercase; color:var(--ink3); white-space:nowrap;
+}
+.vital .v{font-family:var(--mono); font-size:20px; font-weight:500; margin-top:3px;
+  font-variant-numeric:tabular-nums}
+.vital .v small{font-size:11px; color:var(--ink3); font-weight:400}
+.verdict{grid-column:1/-1; border-right:0; border-top:1px solid var(--rule2);
+  font-family:var(--mono); font-size:12px; color:var(--ink2)}
+.verdict b{font-family:var(--cond);font-size:10px;letter-spacing:.11em;
+  text-transform:uppercase;color:var(--ink3);font-weight:600}
+
+/* ---------- tabs ---------- */
+nav{display:flex; gap:2px; margin:22px 0 0; flex-wrap:wrap}
+.tab{
+  font-family:var(--cond); font-weight:600; font-size:13px; letter-spacing:.03em;
+  background:transparent; border:1px solid var(--rule); border-bottom:none;
+  color:var(--ink2); padding:9px 15px 8px; cursor:pointer; border-radius:3px 3px 0 0;
+}
+.tab[aria-selected=true]{background:var(--card); color:var(--ink); border-color:var(--ink);
+  box-shadow:0 2px 0 0 var(--card)}
+.tab .n{font-family:var(--mono); font-size:11px; color:var(--ink3); margin-left:6px}
+.tab[aria-selected=true] .n{color:var(--mark)}
+.tab:focus-visible{outline:2px solid var(--mark); outline-offset:2px}
+
+/* ---------- board ---------- */
+.board{background:var(--card); border:1px solid var(--ink); border-radius:0 3px 3px 3px}
+.note{padding:11px 14px; border-bottom:1px solid var(--rule2); color:var(--ink2);
+  font-size:12.5px}
+.rows{display:block}
+
+.row{
+  display:grid; align-items:center; gap:0 10px;
+  grid-template-columns:var(--rail) 1fr 78px 60px 60px 84px 62px 74px;
+  padding:0 12px 0 0; border-bottom:1px solid var(--rule2);
+  cursor:pointer; background:none; border-left:0; border-right:0; border-top:0;
+  width:100%; text-align:left; font:inherit; color:inherit;
+}
+.row:hover{background:#F4F7F9}
+.row:focus-visible{outline:2px solid var(--mark); outline-offset:-2px}
+.head{
+  font-family:var(--cond); font-size:10px; font-weight:600; letter-spacing:.1em;
+  text-transform:uppercase; color:var(--ink3); cursor:default; background:#F7F9FA;
+  border-bottom:1px solid var(--rule); position:sticky; top:0; z-index:2;
+}
+.head:hover{background:#F7F9FA}
+.head>*{padding:8px 0}
+
+/* the delta rail - signature element */
+.rail{
+  align-self:stretch; display:flex; flex-direction:column; align-items:center;
+  justify-content:center; gap:3px; border-right:1px solid var(--rule2);
+  padding:9px 0; min-height:44px;
+}
+.rail .dot{width:6px;height:6px;border-radius:50%;background:transparent}
+.rail .dot.new{background:var(--mark)}
+.rail .dot.up{background:var(--pass)}
+.rail .dot.dn{background:var(--fail)}
+.rail .ticks{font-family:var(--mono);font-size:9px;color:var(--ink3);line-height:1}
+
+.sym{font-family:var(--cond); font-weight:700; font-size:16px; letter-spacing:.01em;
+  padding:9px 0; display:flex; align-items:center; gap:8px; min-width:0}
+.sym span.q{
+  font-family:var(--mono); font-size:9.5px; font-weight:500; letter-spacing:.04em;
+  color:var(--ink2); border:1px solid var(--rule); padding:1px 4px; border-radius:2px;
+  white-space:nowrap;
+}
+.num{font-family:var(--mono); font-size:13px; font-variant-numeric:tabular-nums;
+  text-align:right; padding:9px 0}
+.num.chg.p{color:var(--up)} .num.chg.n{color:var(--dn)}
+.tier{
+  font-family:var(--cond); font-size:10.5px; font-weight:700; letter-spacing:.08em;
+  text-align:right; padding:9px 0;
+}
+.tier.PASS{color:var(--pass)} .tier.NEAR{color:var(--near)} .tier.FAIL{color:var(--fail)}
+.bar{height:3px;background:var(--rule2);position:relative;border-radius:2px;margin:9px 0}
+.bar i{position:absolute;inset:0 auto 0 0;background:var(--ink);border-radius:2px}
+
+/* detail */
+.detail{background:#F7F9FA;border-bottom:1px solid var(--rule);padding:12px 14px 14px 38px;
+  display:none}
+.detail.open{display:block}
+.dgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:10px 18px}
+.dgrid div{min-width:0}
+.dgrid .k{font-family:var(--cond);font-size:9.5px;font-weight:600;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--ink3)}
+.dgrid .v{font-family:var(--mono);font-size:12.5px;margin-top:1px;word-break:break-word}
+.chips{margin-top:11px;display:flex;flex-wrap:wrap;gap:5px}
+.chip{font-family:var(--mono);font-size:10.5px;padding:2px 6px;border-radius:2px;
+  border:1px solid var(--rule);color:var(--ink2);background:#fff}
+.chip.ok{border-color:#A9CFC0;color:var(--pass)}
+.chip.no{border-color:#DDB9B9;color:var(--fail)}
+
+.empty{padding:30px 16px;text-align:left;color:var(--ink2)}
+.empty b{display:block;font-family:var(--cond);font-size:15px;color:var(--ink);
+  margin-bottom:5px;font-weight:700}
+.exits{padding:11px 14px;border-top:1px solid var(--rule);background:#F7F9FA;
+  font-family:var(--mono);font-size:12px;color:var(--ink2)}
+.exits b{font-family:var(--cond);font-size:10px;letter-spacing:.11em;
+  text-transform:uppercase;color:var(--ink3);font-weight:600}
+footer{margin-top:18px;font-family:var(--mono);font-size:11px;color:var(--ink3)}
+footer a{color:var(--ink2)}
+
+@media (max-width:760px){
+  .row{grid-template-columns:var(--rail) 1fr auto; row-gap:0; padding-right:10px}
+  .head{display:none}
+  .sym{padding:9px 0 2px}
+  .row .num.rl,.row .num.rs,.row .bar{display:none}
+  .row .num.px{grid-column:3;grid-row:1;padding:9px 0 2px}
+  .row .num.chg{grid-column:2;grid-row:2;text-align:left;padding:0 0 9px;font-size:11.5px}
+  .row .tier{grid-column:3;grid-row:2;padding:0 0 9px;font-size:10px}
+  .detail{padding-left:14px}
+}
+@media (prefers-reduced-motion:no-preference){
+  .rows .row{animation:in .26s ease both}
+  @keyframes in{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <div class="eyebrow">NSE · daily scan</div>
+  <h1>Momentum Board</h1>
+  <div class="stamp" id="stamp"></div>
+</header>
+
+<section class="vitals" id="vitals"></section>
+
+<nav id="tabs" role="tablist"></nav>
+<div class="board" id="board" role="tabpanel"></div>
+<footer id="foot"></footer>
+</div>
+
+<script>
+const F = {
+  rs_long:  {label:"RS 123",     desc:"Top decile on 123-day volatility-adjusted relative strength."},
+  rs_short: {label:"RS 55",      desc:"Top decile on 55-day volatility-adjusted relative strength."},
+  new:      {label:"New today",  desc:"Names that entered any list on this run. This is the list to read first."},
+  base:     {label:"Base",       desc:"Structurally the target base, sorted by whether the geometry agrees with the count."}
+};
+let DATA=null, TAB="new", OPEN=null;
+
+const n = (v,d=1)=> v===null||v===undefined||Number.isNaN(v) ? "–" : Number(v).toFixed(d);
+const esc = s => String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+function vitals(d){
+  const c=d.counts, cf=d.confound||{};
+  const cells=[
+    ["scanned", c && d.universe, ""],
+    ["RS 123", c.rs_long, ""],
+    ["RS 55", c.rs_short, ""],
+    ["new today", c.new, ""],
+    [`base ${d.target_base} pass`, c.base_pass, `of ${c.base}`],
+    ["near", c.base_near, "one gate"],
+  ].map(([k,v,s])=>`<div class="vital"><div class="k">${esc(k)}</div>
+      <div class="v">${v??"–"}${s?` <small>${esc(s)}</small>`:""}</div></div>`).join("");
+  const tr = cf.trough===null||cf.trough===undefined ? "–" : cf.trough+"%";
+  document.getElementById("vitals").innerHTML = cells +
+    `<div class="vital verdict"><b>confound</b> &nbsp;${esc(cf.verdict||"–")}
+      &nbsp;·&nbsp; ${tr} of resets within ±60 sessions of a proxy drawdown trough
+      &nbsp;·&nbsp; top-2 years ${cf.top2??"–"}%</div>`;
+}
+
+function tabs(){
+  document.getElementById("tabs").innerHTML = Object.keys(F).map(k=>{
+    const lab = k==="base" ? `Base ${DATA.target_base}` : F[k].label;
+    const ct = (DATA.lists[k]||[]).length;
+    return `<button class="tab" role="tab" data-k="${k}" aria-selected="${k===TAB}">
+      ${esc(lab)}<span class="n">${ct}</span></button>`;
+  }).join("");
+  document.querySelectorAll(".tab").forEach(b=>
+    b.onclick=()=>{TAB=b.dataset.k; OPEN=null; tabs(); board();});
+}
+
+function rail(r){
+  const d=r.delta==="entered", u=r.tier_delta==="tier_up", w=r.tier_delta==="tier_down";
+  const cls = d?"new":u?"up":w?"dn":"";
+  const title = d?"entered today":u?`tier up from ${r.tier_from}`:w?`tier down from ${r.tier_from}`:"";
+  return `<div class="rail" title="${esc(title)}"><div class="dot ${cls}"></div>
+    <div class="ticks">${r.days_in??""}</div></div>`;
+}
+
+function row(r,i){
+  const chg = r.chg>0?"p":r.chg<0?"n":"";
+  const rl = r.rs_long??0;
+  return `<button class="row" data-s="${esc(r.symbol)}" style="animation-delay:${Math.min(i,14)*11}ms">
+    ${rail(r)}
+    <div class="sym">${esc(r.symbol)}<span class="q">${esc(r.quad)}</span></div>
+    <div class="num px">${n(r.price,1)}</div>
+    <div class="num chg ${chg}">${r.chg>0?"+":""}${n(r.chg,2)}%</div>
+    <div class="num rl">${n(r.rs_long,0)}</div>
+    <div class="num rs">${n(r.rs_short,0)}</div>
+    <div class="bar" title="RS 123 percentile"><i style="width:${rl}%"></i></div>
+    <div class="tier ${esc(r.tier||"")}">${esc(r.tier||"")}</div>
+  </button>` + detail(r);
+}
+
+function detail(r){
+  const on = OPEN===r.symbol;
+  const f=r.flags||{};
+  const items=[
+    ["base #", r.next_base], ["counted from", r.count_start],
+    ["pivot", n(r.pivot,1)], ["to pivot", r.dist_to_pivot!=null?n(r.dist_to_pivot,1)+"%":"–"],
+    ["base age", r.base_len!=null?r.base_len+" sessions":"–"],
+    ["depth", r.depth_pct!=null?n(r.depth_pct,1)+"%":"–"],
+    ["pullbacks", (r.pullbacks||[]).length?r.pullbacks.join(" → ")+"%":"–"],
+    ["range contraction", n(r.range_contraction,2)],
+    ["volume dry-up", n(r.vol_dryup,2)],
+    ["position in base", n(r.pos_in_base,2)],
+    ["turnover", r.turnover_cr!=null?"₹"+n(r.turnover_cr,1)+" cr":"–"],
+    ["days in list", r.days_in],
+  ].map(([k,v])=>`<div><div class="k">${esc(k)}</div><div class="v">${esc(v??"–")}</div></div>`).join("");
+  const chips = Object.keys(f).length
+    ? `<div class="chips">${Object.entries(f).map(([k,v])=>
+        `<span class="chip ${v?"ok":"no"}">${v?"✓":"✗"} ${esc(k.replace("q_",""))}</span>`).join("")}</div>`
+    : "";
+  const s2 = (r.stage2_fails||[]).length
+    ? `<div class="chips"><span class="chip no">stage 2 fails: ${esc(r.stage2_fails.join(", "))}</span></div>` : "";
+  return `<div class="detail ${on?"open":""}"><div class="dgrid">${items}</div>${chips}${s2}</div>`;
+}
+
+function board(){
+  const rows = DATA.lists[TAB]||[];
+  const ex = (DATA.exits||{})[TAB]||[];
+  let html = `<div class="note">${esc(F[TAB].desc)}</div>`;
+  if(!rows.length){
+    html += `<div class="empty"><b>Nothing in this list today.</b>
+      ${TAB==="base"
+        ? `An empty base list means nothing currently has both the right base count and a base that looks like absorption. Check the other tabs, or lower the gates in <code>scan.py</code> and rerun.`
+        : `Nothing crossed the threshold on this run. The other tabs may still have entries.`}</div>`;
+  } else {
+    html += `<div class="row head" aria-hidden="true"><div></div><div>symbol</div>
+      <div style="text-align:right">price</div><div style="text-align:right">chg</div>
+      <div style="text-align:right">rs123</div><div style="text-align:right">rs55</div>
+      <div></div><div style="text-align:right">tier</div></div>`;
+    html += `<div class="rows">` + rows.map(row).join("") + `</div>`;
+  }
+  if(ex.length) html += `<div class="exits"><b>left this list</b> &nbsp;${ex.map(esc).join("  ·  ")}</div>`;
+  const b=document.getElementById("board");
+  b.innerHTML=html;
+  b.querySelectorAll(".row[data-s]").forEach(el=>el.onclick=()=>{
+    OPEN = OPEN===el.dataset.s ? null : el.dataset.s; board();
+  });
+}
+
+// Where to read the scan from.
+//
+// A commit made by the workflow's built-in token does NOT trigger a Pages
+// rebuild (GitHub blocks that to prevent recursion), so the deployed copy of
+// data/latest.json goes stale immediately. Reading from raw.githubusercontent
+// instead always returns the newest commit, and needs no rebuild at all.
+// The repo path is derived from the page URL, so nothing is hardcoded.
+function sources(){
+  const out=[];
+  const h=location.hostname, p=location.pathname;
+  if(h.endsWith("github.io")){
+    const user=h.split(".")[0];
+    const repo=p.split("/").filter(Boolean)[0];
+    if(user&&repo){
+      for(const br of ["main","master"]){
+        out.push(`https://raw.githubusercontent.com/${user}/${repo}/${br}/docs/data/latest.json`);
+      }
+    }
+  }
+  out.push("data/latest.json");     // local preview, or if Pages did rebuild
+  return out;
+}
+
+async function load(){
+  let last="";
+  for(const u of sources()){
+    try{
+      const r=await fetch(u+(u.includes("?")?"&":"?")+"t="+Date.now(),{cache:"no-store"});
+      if(!r.ok){ last="HTTP "+r.status+" on "+u.split("/").slice(-1); continue; }
+      return await r.json();
+    }catch(e){ last=e.message; }
+  }
+  throw new Error(last||"no source reachable");
+}
+
+load().then(d=>{
+  DATA=d;
+  document.getElementById("stamp").innerHTML =
+    `<span>close ${esc(d.as_of)}</span><span>scanned ${esc(d.generated_at.replace("T"," ").slice(0,16))} IST</span>` +
+    (d.demo?`<span class="demo">demo data</span>`:"");
+  vitals(d); tabs(); board();
+  document.getElementById("foot").innerHTML =
+    `RS = return ÷ realised volatility, percentile-ranked across ${d.universe} names. ` +
+    `Leader threshold ${d.params.leader_pctl}th pctl. ` +
+    `Gates: range_contraction &lt; ${d.params.range_max}, vol_dryup &lt; ${d.params.vol_max}. ` +
+    `Candidate generator — no forward-return validation has been done.`;
+}).catch(e=>{
+  document.getElementById("board").innerHTML =
+    `<div class="empty"><b>No scan data yet.</b>The board reads
+     <code>docs/data/latest.json</code>. Run <code>python scan.py --demo</code> to
+     generate a sample, or wait for the scheduled job to publish its first run.
+     <br><br><span style="font-family:var(--mono);font-size:12px">${esc(e.message)}</span></div>`;
+});
+</script>
+</body>
+</html>
 
