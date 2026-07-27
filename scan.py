@@ -561,6 +561,19 @@ BENCH = "^NSEI"              # Nifty 50, for relative-strength and regime
 RS_LONG, RS_SHORT = 123, 55
 RS_TREND_LOOKBACK = 21       # sessions back, for RS rising/falling
 RS_TREND_BAND = 5.0          # percentile points that count as a real move
+
+# ---- Anchored RS (ARS), ported from the RS Screener v2 notebook ----
+HIGH_LOOKBACK    = 252       # 52-week high window
+PROX_MAIN        = 0.85      # main lists: within 15% of the 52w high
+PROX_EMERGING    = 0.75      # EMERGING relaxed
+FAKE_CONC_LIMIT  = 0.50      # top-3 up days >50% of the up-move = fake
+TOP_N            = 25        # rolling RS list size
+RECOVERY_BARS    = 15        # bars above 200 EMA to confirm recovery (whipsaw fix)
+MANUAL_ANCHOR    = None      # "2026-02-27" to force; None = auto-detect
+ARS_STREAK_MIN   = 21        # consecutive ARS-positive days for EMERGING
+ARS_IMPROVE_LAG  = 10        # ARS today must beat ARS this many days ago
+YOUNG_STREAK_MAX = 60        # cap streak to exclude sideways defensives
+USE_YOUNG_FILTER = True
 DD_DROP = 0.002              # index down >0.2% = candidate distribution day
 DD_WINDOW = 25               # trailing sessions for the distribution count
 RS_LEADER_PCTL = 90          # top decile counts as a leader
@@ -902,6 +915,123 @@ def market_regime(bench, panel):
     )
 
 
+def find_anchor(above, recovery_bars=RECOVERY_BARS):
+    """
+    Most recent 200-EMA breakdown on the benchmark, ignoring recoveries shorter
+    than recovery_bars. That whipsaw guard is what stops the anchor jumping to
+    every one-day poke above the EMA.
+    """
+    run_above, anchor, confirmed = 0, None, True
+    for dt, a in above.items():
+        if a:
+            run_above += 1
+            if run_above >= recovery_bars:
+                confirmed = True
+        else:
+            if confirmed:
+                anchor = dt
+            confirmed = False
+            run_above = 0
+    return anchor
+
+
+def anchor_state(bench):
+    """Regime + ARS anchor. Returns None if there is no usable benchmark."""
+    if bench is None or len(bench) < 60:
+        return None
+    c = bench["Close"]
+    ema200 = c.ewm(span=200, adjust=False).mean()
+    above = c > ema200
+    if MANUAL_ANCHOR:
+        a = pd.Timestamp(MANUAL_ANCHOR)
+    else:
+        a = find_anchor(above)
+        if a is None:
+            a = c.index[max(0, len(c) - RS_LONG)]
+    a = c.index[c.index.get_indexer([a], method="nearest")[0]]
+    return dict(
+        anchor=a,
+        anchor_date=str(a.date()),
+        bars_since=int(len(c.loc[a:])),
+        above_200ema=bool(above.iloc[-1]),
+        regime=("risk-on" if above.iloc[-1] else "risk-off"),
+        nifty_since_anchor=round(float(c.iloc[-1] / c.loc[a] - 1) * 100, 2),
+    )
+
+
+def ars_metrics(s, bench_c, anc):
+    """
+    Anchored RS for one stock: outperformance of the benchmark measured from the
+    anchor, plus the daily ARS series it implies, which gives the streak and the
+    improving flag.
+    """
+    out = dict(ars=np.nan, ars_streak=0, ars_improving=False,
+               ret_anchor=np.nan, held_up=False)
+    if anc is None or bench_c is None:
+        return out
+    a = anc["anchor"]
+    if a not in s.index or a not in bench_c.index:
+        return out
+    ret_anchor = float(s.iloc[-1] / s.loc[a] - 1)
+    nifty = anc["nifty_since_anchor"] / 100.0
+    out["ret_anchor"] = ret_anchor
+    out["ars"] = ret_anchor - nifty
+    out["held_up"] = bool(ret_anchor > 0 and nifty < 0)
+
+    sc = s.loc[a:] / s.loc[a]
+    bc = bench_c.loc[a:] / bench_c.loc[a]
+    idx = sc.index.intersection(bc.index)
+    if len(idx) < 3:
+        return out
+    ars_daily = (sc.reindex(idx) / bc.reindex(idx) - 1).dropna()
+    if not len(ars_daily):
+        return out
+    streak = 0
+    for v in (ars_daily > 0).iloc[::-1]:
+        if v:
+            streak += 1
+        else:
+            break
+    out["ars_streak"] = int(streak)
+    out["ars_improving"] = bool(
+        len(ars_daily) > ARS_IMPROVE_LAG
+        and ars_daily.iloc[-1] > ars_daily.iloc[-1 - ARS_IMPROVE_LAG])
+    return out
+
+
+def excess_rs(s, bench_c, lb=RS_LONG):
+    """
+    Volatility-adjusted EXCESS return over the benchmark, zero-centred.
+    RS > 0 means genuinely outperforming the index, which a percentile of
+    absolute return cannot express.
+    """
+    if bench_c is None or len(s) < lb + 1 or len(bench_c) < lb + 1:
+        return np.nan
+    win = s.iloc[-lb:]
+    stock_ret = float(win.iloc[-1] / win.iloc[0] - 1)
+    bench_ret = float(bench_c.iloc[-1] / bench_c.iloc[-lb] - 1)
+    dvol = float(win.pct_change().std())
+    if not np.isfinite(dvol) or dvol <= 0:
+        return np.nan
+    return (stock_ret - bench_ret) / (dvol * np.sqrt(lb))
+
+
+def fake_move(s, lb=RS_LONG):
+    """
+    True when the whole advance is a handful of gaps: if the three biggest up
+    days account for more than FAKE_CONC_LIMIT of all up-movement, the trend is
+    an artefact rather than accumulation.
+    """
+    if len(s) < lb + 2:
+        return False, np.nan
+    win = s.iloc[-lb:]
+    rets = win.pct_change().dropna()
+    up = rets[rets > 0].sum()
+    conc = float(rets.nlargest(3).sum() / up) if up > 0 else 1.0
+    stock_ret = float(win.iloc[-1] / win.iloc[0] - 1)
+    return bool(stock_ret > 0 and conc > FAKE_CONC_LIMIT), conc
+
+
 def demo_bench(panel):
     """Synthetic Nifty for demo mode: equal-weight mean of the panel."""
     if not panel:
@@ -922,21 +1052,26 @@ def rs_score(df, lb):
     return np.nan if (not np.isfinite(vol) or vol <= 0) else ret / vol
 
 
-def quadrant(long_p, short_p, cut=RS_LEADER_PCTL):
-    """Reuses the RRG taxonomy: short vs long horizon leadership."""
-    if not (np.isfinite(long_p) and np.isfinite(short_p)):
-        return "—"
-    hi_l, hi_s = long_p >= cut, short_p >= cut
-    if hi_l and hi_s:
+def quadrant(rs, ars):
+    """
+    The notebook's taxonomy, on signed RS and ARS rather than two percentiles:
+      A-LIST   leading over the rolling window AND since the anchor
+      AGING    still leads on the rolling window but not since the anchor
+      EMERGING lagging on the window but leading since the anchor - the turn
+      LAGGARD  neither
+    """
+    ok_rs = np.isfinite(rs) and rs > 0
+    ok_ars = np.isfinite(ars) and ars > 0
+    if ok_rs and ok_ars:
         return "A-LIST"
-    if hi_s and not hi_l:
-        return "EMERGING"
-    if hi_l and not hi_s:
+    if ok_rs:
         return "AGING"
+    if ok_ars:
+        return "EMERGING"
     return "LAGGARD"
 
 
-def build_rows(panel, bench=None, sectors=None):
+def build_rows(panel, bench=None, sectors=None, anc=None):
     sectors = sectors or {}
     bc = bench["Close"] if bench is not None else None
 
@@ -971,8 +1106,24 @@ def build_rows(panel, bench=None, sectors=None):
         v55 = vs_bench(c, bc, RS_SHORT) if bc is not None else np.nan
         mans = mansfield(c, bc, RS_LONG) if bc is not None else np.nan
 
+        rs_x = excess_rs(c, bc, RS_LONG)
+        A = ars_metrics(c, bc, anc)
+        fake, conc = fake_move(c, RS_LONG)
+        hi52 = float(c.iloc[-HIGH_LOOKBACK:].max()) if len(c) >= 30 else np.nan
+        prox = float(px / hi52) if np.isfinite(hi52) and hi52 > 0 else np.nan
+        dma50 = float(c.iloc[-50:].mean()) if len(c) >= 50 else np.nan
+
         row = dict(symbol=s, price=round(px, 1), chg=round(chg, 2),
                    sector=sectors.get(s) or "Unclassified",
+                   rs=None if not np.isfinite(rs_x) else round(rs_x, 3),
+                   ars=None if not np.isfinite(A["ars"]) else round(A["ars"] * 100, 1),
+                   ars_streak=A["ars_streak"], ars_improving=A["ars_improving"],
+                   ret_anchor=(None if not np.isfinite(A["ret_anchor"])
+                               else round(A["ret_anchor"] * 100, 1)),
+                   held_up=A["held_up"], fake=fake,
+                   conc3=None if not np.isfinite(conc) else round(conc, 2),
+                   prox52w=None if not np.isfinite(prox) else round(prox, 3),
+                   above50=bool(np.isfinite(dma50) and px > dma50),
                    rs_long=None if np.isnan(lp) else lp,
                    rs_short=None if np.isnan(sp) else sp,
                    vs_nifty_long=None if not np.isfinite(v123) else round(v123, 1),
@@ -980,7 +1131,7 @@ def build_rows(panel, bench=None, sectors=None):
                    mansfield=None if not np.isfinite(mans) else round(mans, 1),
                    rs_delta=None if not np.isfinite(d_rs) else round(d_rs, 1),
                    rs_trend=trend_label(d_rs),
-                   quad=quadrant(lp, sp), stage2=bool(g),
+                   quad=quadrant(rs_x, A["ars"]), stage2=bool(g),
                    stage2_fails=[k for k, v in checks.items() if not v],
                    next_base=int(res["next_base_number"]),
                    count_start=str(res["count_start"].date()),
@@ -1018,7 +1169,61 @@ def build_rows(panel, bench=None, sectors=None):
     return rows
 
 
-def sector_summary(rows, leaders_long, leaders_short):
+def build_lists(rows, anc):
+    """
+    The four notebook lists, plus the unfiltered RS-positive set.
+    Fake movers are excluded from all of them.
+    """
+    clean = [r for r in rows.values() if not r["fake"]]
+    P = lambda r: (r["prox52w"] or 0)
+    RS = lambda r: (r["rs"] if r["rs"] is not None else -9e9)
+    AR = lambda r: (r["ars"] if r["ars"] is not None else -9e9)
+
+    rolling = sorted([r for r in clean if RS(r) > 0 and P(r) >= PROX_MAIN],
+                     key=lambda r: -RS(r))[:TOP_N]
+    heldup = sorted([r for r in clean if AR(r) > 0 and P(r) >= PROX_MAIN],
+                    key=lambda r: -AR(r))
+    rset = {r["symbol"] for r in rolling}
+    alist = [r for r in heldup if r["symbol"] in rset]
+    alist = sorted(alist, key=lambda r: -RS(r))
+
+    emerging = [r for r in clean
+                if RS(r) <= 0 and AR(r) > 0
+                and r["ars_streak"] >= ARS_STREAK_MIN
+                and r["ars_improving"] and r["above50"]
+                and P(r) >= PROX_EMERGING]
+    if USE_YOUNG_FILTER:
+        emerging = [r for r in emerging if r["ars_streak"] <= YOUNG_STREAK_MAX]
+    emerging = sorted(emerging, key=lambda r: -AR(r))
+
+    all_rs_pos = sorted([r for r in clean if RS(r) > 0], key=lambda r: -RS(r))
+
+    return dict(alist=alist, rolling=rolling, heldup=heldup,
+                emerging=emerging, rs_pos=all_rs_pos)
+
+
+def sector_summary(rows, rs_pos):
+    """
+    Sector counts over the RS-positive set, with average RS and the member names
+    - the notebook's view. Share of the sector matters more than the raw count.
+    """
+    from collections import Counter, defaultdict
+    tot = Counter(r["sector"] for r in rows.values())
+    grp = defaultdict(list)
+    for r in rs_pos:
+        grp[r["sector"]].append(r)
+    out = []
+    for sec, n in tot.items():
+        mem = grp.get(sec, [])
+        rsv = [m["rs"] for m in mem if m["rs"] is not None]
+        arv = [m["ars"] for m in mem if m["ars"] is not None]
+        out.append(dict(
+            sector=sec, n=n, count=len(mem),
+            share=round(100.0 * len(mem) / n, 1) if n else 0.0,
+            avg_rs=round(float(np.mean(rsv)), 3) if rsv else None,
+            avg_ars=round(float(np.mean(arv)), 1) if arv else None,
+            stocks=[m["symbol"] for m in sorted(mem, key=lambda x: -(x["rs"] or 0))]))
+    return sorted(out, key=lambda x: (-x["count"], -x["share"]))
     """
     Counts per sector: how many names exist, how many lead on each horizon, and
     the share leading. Share matters more than the raw count - a sector with 8
@@ -1147,36 +1352,33 @@ def main():
         sys.exit("no data fetched")
     print(f"panel: {len(panel)} symbols")
 
-    rows = build_rows(panel, bench, sectors)
+    anc = anchor_state(bench)
+    rows = build_rows(panel, bench, sectors, anc)
     regime = market_regime(bench, panel)
+    if regime and anc:
+        regime.update(anchor_date=anc["anchor_date"], bars_since=anc["bars_since"],
+                      above_200ema=anc["above_200ema"], trend=anc["regime"],
+                      nifty_since_anchor=anc["nifty_since_anchor"])
     as_of = max(d.index[-1] for d in panel.values()).date().isoformat()
 
-    leaders_long = sorted([r for r in rows.values()
-                           if (r["rs_long"] or 0) >= RS_LEADER_PCTL],
-                          key=lambda r: -r["rs_long"])
-    leaders_short = sorted([r for r in rows.values()
-                           if (r["rs_short"] or 0) >= RS_LEADER_PCTL],
-                           key=lambda r: -r["rs_short"])
+    L = build_lists(rows, anc)
     base_rows = base_candidates(rows, a.target_base)
-    sectors_out = sector_summary(rows, leaders_long, leaders_short)
+    sectors_out = sector_summary(rows, L["rs_pos"])
 
-    # dict(r) per list: build_rows returns one object per symbol, and all three
-    # lists reference the same objects, so per-list days_in/delta must not share.
-    lists = {"rs_long": [dict(r) for r in leaders_long],
-             "rs_short": [dict(r) for r in leaders_short],
-             "base": [dict(r) for r in base_rows]}
+    lists = {k: [dict(r) for r in v] for k, v in
+             (("alist", L["alist"]), ("rolling", L["rolling"]),
+              ("heldup", L["heldup"]), ("emerging", L["emerging"]),
+              ("rs_pos", L["rs_pos"]), ("base", base_rows))}
     exits = diff(prev, lists)
 
-    # "new today" is the union of fresh entries across the three lists
     new = {}
     for k, rowsl in lists.items():
         for r in rowsl:
             if r.get("delta") == "entered":
                 new.setdefault(r["symbol"], dict(r, entered_in=[]))
                 new[r["symbol"]]["entered_in"].append(k)
-    lists["new"] = sorted(new.values(), key=lambda r: -(r["rs_short"] or 0))
+    lists["new"] = sorted(new.values(), key=lambda r: -(r["rs"] or -9e9))
 
-    # confound diagnostics, reusing the scan frame
     scan_df = pd.DataFrame([
         dict(symbol=r["symbol"], in_base=r["in_base"], reliable=r["reliable"],
              count_start=r["count_start"], next_base=r["next_base"])
@@ -1202,6 +1404,8 @@ def main():
     tiers = {}
     for r in base_rows:
         tiers[r["tier"]] = tiers.get(r["tier"], 0) + 1
+    from collections import Counter
+    quads = Counter(r["quad"] for r in rows.values())
 
     out = dict(
         generated_at=datetime.now(IST).isoformat(timespec="seconds"),
@@ -1209,13 +1413,17 @@ def main():
         target_base=a.target_base,
         params=dict(rs_long=RS_LONG, rs_short=RS_SHORT,
                     leader_pctl=RS_LEADER_PCTL, range_max=QUAL["range_max"],
-                    vol_max=QUAL["vol_max"]),
-        counts=dict(rs_long=len(leaders_long), rs_short=len(leaders_short),
-                    new=len(lists["new"]), base=len(base_rows),
-                    base_pass=tiers.get("PASS", 0), base_near=tiers.get("NEAR", 0),
-                    base_fail=tiers.get("FAIL", 0)),
-        exits=exits, confound=confound, regime=regime,
-        sectors=sectors_out,
+                    vol_max=QUAL["vol_max"], prox_main=PROX_MAIN,
+                    prox_emerging=PROX_EMERGING, top_n=TOP_N,
+                    ars_streak_min=ARS_STREAK_MIN),
+        counts=dict(alist=len(L["alist"]), rolling=len(L["rolling"]),
+                    heldup=len(L["heldup"]), emerging=len(L["emerging"]),
+                    rs_pos=len(L["rs_pos"]), new=len(lists["new"]),
+                    base=len(base_rows), base_pass=tiers.get("PASS", 0),
+                    base_near=tiers.get("NEAR", 0), base_fail=tiers.get("FAIL", 0),
+                    fakes=sum(1 for r in rows.values() if r["fake"])),
+        quadrants={k: int(v) for k, v in quads.items()},
+        exits=exits, confound=confound, regime=regime, sectors=sectors_out,
         base_dist={str(k): int(v) for k, v in
                    pd.Series([r["next_base"] for r in rows.values()
                               if r["in_base"]]).value_counts().sort_index().items()},
@@ -1228,8 +1436,19 @@ def main():
         json.dump(out, f, separators=(",", ":"))
 
     print(f"\nas_of {as_of} | universe {len(panel)}")
-    print(f"  RS{RS_LONG} leaders : {len(leaders_long)}")
-    print(f"  RS{RS_SHORT} leaders  : {len(leaders_short)}")
+    if anc:
+        print(f"  regime        : {anc['regime']} | anchor {anc['anchor_date']} "
+              f"({anc['bars_since']} bars) | Nifty since anchor "
+              f"{anc['nifty_since_anchor']:+.2f}%")
+    print(f"  quadrants     : " + ", ".join(f"{k} {v}" for k, v in quads.most_common()))
+    print(f"  A-LIST        : {len(L['alist'])}")
+    print(f"  rolling top{TOP_N}  : {len(L['rolling'])}")
+    print(f"  ARS held-up   : {len(L['heldup'])}")
+    print(f"  EMERGING      : {len(L['emerging'])}"
+          + ("   (zero is informative in a rotation-less tape, not a bug)"
+             if not L['emerging'] else ""))
+    print(f"  all RS>0      : {len(L['rs_pos'])}")
+    print(f"  fakes excluded: {out['counts']['fakes']}")
     print(f"  new today     : {len(lists['new'])}")
     print(f"  base {a.target_base}        : {len(base_rows)} "
           f"(PASS {tiers.get('PASS',0)} / NEAR {tiers.get('NEAR',0)} / "
@@ -1240,7 +1459,7 @@ def main():
               f"{regime['window']} sessions -> {regime['state']}"
               f"  (Nifty {regime['off_high']}% off high)")
     print("  top sectors   : " + ", ".join(
-        f"{x['sector'].split()[0]} {x['rs_long']}/{x['n']}"
+        f"{x['sector'].split()[0]} {x['count']}/{x['n']}"
         for x in sectors_out[:5]))
     print(f"wrote {LATEST}")
 
