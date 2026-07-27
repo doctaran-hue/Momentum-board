@@ -878,6 +878,105 @@ def trend_label(delta_pp, band=None):
     return "FLAT"
 
 
+def breadth(panel, bench=None, hist=250):
+    """
+    Market breadth from the panel itself, in three constructions that lag by
+    different amounts.
+
+      pct_above_200 / _50  - a LEVEL. Turns the day stocks cross. No lag beyond
+                             the moving average itself.
+      mcclellan            - 19-EMA minus 39-EMA of the daily net-advance ratio.
+                             Differencing two EMAs of the DAILY series, so no
+                             cumulation and no integration lag.
+      ad_line + ad_ema20   - the cumulative advance-decline line and its 20 EMA.
+                             Included for context and divergence, NOT as a
+                             trigger: it is an integral, so waiting for the EMA
+                             slope to bend stacks two lags and fires well after
+                             a trailing stop would have exited.
+
+    Survivorship warning: the panel is today's constituent list, so a cumulative
+    AD line computed back over years is biased upward - the losers that were
+    delisted are missing. That distortion compounds in a cumulative series and
+    barely touches the point-in-time percentages, which is another reason to
+    read the levels rather than the line.
+    """
+    if not panel:
+        return None
+    close = pd.DataFrame({k: v["Close"] for k, v in panel.items()})
+    if close.shape[1] < 20 or len(close) < 260:
+        return None
+
+    sma200 = close.rolling(200).mean()
+    sma50 = close.rolling(50).mean()
+    n200 = (close > sma200).sum(axis=1)
+    d200 = sma200.notna().sum(axis=1)
+    n50 = (close > sma50).sum(axis=1)
+    d50 = sma50.notna().sum(axis=1)
+    pct200 = (100.0 * n200 / d200.replace(0, np.nan)).dropna()
+    pct50 = (100.0 * n50 / d50.replace(0, np.nan)).dropna()
+
+    chg = close.pct_change()
+    adv = (chg > 0).sum(axis=1)
+    dec = (chg < 0).sum(axis=1)
+    part = (adv + dec).replace(0, np.nan)
+    net_ratio = ((adv - dec) / part * 100).dropna()          # daily, not cumulated
+    ad_line = (adv - dec).cumsum().astype(float)
+    ad_ema = ad_line.ewm(span=20, adjust=False).mean()
+    mcc = (net_ratio.ewm(span=19, adjust=False).mean()
+           - net_ratio.ewm(span=39, adjust=False).mean())
+
+    hi = close.rolling(252).max()
+    lo = close.rolling(252).min()
+    nh = (close >= hi).sum(axis=1)
+    nl = (close <= lo).sum(axis=1)
+    net_hl = (nh - nl).dropna()
+
+    def at(series, back=0):
+        if len(series) <= back:
+            return np.nan
+        return float(series.iloc[-1 - back])
+
+    # Divergence: index at a 60-day high while the AD line is not.
+    diverg = None
+    if bench is not None:
+        bc = bench["Close"]
+        idx = bc.index.intersection(ad_line.index)
+        if len(idx) > 70:
+            b = bc.reindex(idx)
+            a = ad_line.reindex(idx)
+            b_hi = bool(b.iloc[-1] >= b.iloc[-60:].max())
+            a_hi = bool(a.iloc[-1] >= a.iloc[-60:].max())
+            diverg = ("negative" if (b_hi and not a_hi)
+                      else "positive" if (a_hi and not b_hi)
+                      else "none")
+
+    tail = lambda s: [round(float(x), 2) for x in s.iloc[-hist:]]
+    dates = [str(d.date()) for d in pct200.index[-hist:]]
+
+    p200, p200_21 = at(pct200), at(pct200, 21)
+    slope = (at(ad_ema) - at(ad_ema, 5))
+    return dict(
+        pct_above_200=round(p200, 1),
+        pct_above_200_21d=round(p200_21, 1) if np.isfinite(p200_21) else None,
+        pct_above_200_delta=(round(p200 - p200_21, 1)
+                             if np.isfinite(p200) and np.isfinite(p200_21) else None),
+        pct_above_50=round(at(pct50), 1),
+        advances=int(at(adv)), declines=int(at(dec)),
+        net_ratio=round(at(net_ratio), 1),
+        mcclellan=round(at(mcc), 1),
+        mcclellan_21d=round(at(mcc, 21), 1),
+        net_new_highs=int(at(net_hl)),
+        ad_ema20_slope5=round(slope, 1),
+        ad_ema20_falling=bool(slope < 0),
+        divergence=diverg,
+        state=("EXPANDING" if p200 >= 60 else "MIXED" if p200 >= 40 else "CONTRACTING"),
+        series=dict(dates=dates, pct200=tail(pct200),
+                    ad=tail(ad_line.reindex(pct200.index).ffill()),
+                    ad_ema=tail(ad_ema.reindex(pct200.index).ffill()),
+                    mcc=tail(mcc.reindex(pct200.index).ffill())),
+    )
+
+
 def market_regime(bench, panel):
     """
     O'Neil distribution-day count on the Nifty.
@@ -1355,6 +1454,7 @@ def main():
     anc = anchor_state(bench)
     rows = build_rows(panel, bench, sectors, anc)
     regime = market_regime(bench, panel)
+    brd = breadth(panel, bench)
     if regime and anc:
         regime.update(anchor_date=anc["anchor_date"], bars_since=anc["bars_since"],
                       above_200ema=anc["above_200ema"], trend=anc["regime"],
@@ -1423,7 +1523,8 @@ def main():
                     base_near=tiers.get("NEAR", 0), base_fail=tiers.get("FAIL", 0),
                     fakes=sum(1 for r in rows.values() if r["fake"])),
         quadrants={k: int(v) for k, v in quads.items()},
-        exits=exits, confound=confound, regime=regime, sectors=sectors_out,
+        exits=exits, confound=confound, regime=regime, breadth=brd,
+        sectors=sectors_out,
         base_dist={str(k): int(v) for k, v in
                    pd.Series([r["next_base"] for r in rows.values()
                               if r["in_base"]]).value_counts().sort_index().items()},
@@ -1454,6 +1555,13 @@ def main():
           f"(PASS {tiers.get('PASS',0)} / NEAR {tiers.get('NEAR',0)} / "
           f"FAIL {tiers.get('FAIL',0)})")
     print(f"  confound      : {confound.get('verdict')}")
+    if brd:
+        print(f"  breadth       : {brd['pct_above_200']}% above own 200-DMA "
+              f"({brd['pct_above_200_delta']:+.1f} pp in 21d) -> {brd['state']}")
+        print(f"  mcclellan     : {brd['mcclellan']}  (21d ago "
+              f"{brd['mcclellan_21d']})   net new highs {brd['net_new_highs']:+d}")
+        print(f"  AD line       : 20-EMA 5d slope {brd['ad_ema20_slope5']:+.0f}"
+              f"  divergence vs index: {brd['divergence']}")
     if regime:
         print(f"  distribution  : {regime['distribution_days']} in "
               f"{regime['window']} sessions -> {regime['state']}"
