@@ -291,8 +291,31 @@ def base_metrics(df, open_base):
     a = open_base["peak_idx"]
     b = len(df) - 1
     seg = df.iloc[a : b + 1]
-    if len(seg) < 6:
-        return {}
+    px = float(seg["Close"].iloc[-1])
+
+    # Cheap fields are always computable, even for a 2-bar base. Returning an
+    # empty dict here (as this used to) makes every caller crash on a stock that
+    # topped out three sessions ago.
+    out = {
+        "assessable": len(seg) >= 6,
+        "n_bars": int(len(seg)),
+        "range_contraction": np.nan,
+        "pullbacks": [],
+        "n_pullbacks": 0,
+        "n_swings": 0,
+        "contracting": None,
+        "net_contract": None,
+        "vol_dryup": np.nan,
+        "pct_below_pivot": float(px / open_base["peak_val"] - 1),
+        "above_SMA50": bool(px > df["SMA50"].iloc[-1]),
+        "pos_in_base": (
+            float((px - open_base["trough"])
+                  / (open_base["peak_val"] - open_base["trough"]))
+            if open_base["peak_val"] > open_base["trough"] else np.nan
+        ),
+    }
+    if not out["assessable"]:
+        return out
 
     rng = (seg["High"] - seg["Low"]) / seg["Close"]
     third = max(2, len(seg) // 3)
@@ -303,9 +326,8 @@ def base_metrics(df, open_base):
     pbs, n_swings = pullback_depths(seg)
     vol_base = seg["Volume"].mean()
     vol_recent = seg["Volume"].iloc[-5:].mean()
-    px = float(seg["Close"].iloc[-1])
 
-    return {
+    out.update({
         "range_contraction": float(r3 / r1) if r1 > 0 else np.nan,
         "pullbacks": [round(x * 100, 1) for x in pbs],
         "n_pullbacks": len(pbs),
@@ -316,14 +338,8 @@ def base_metrics(df, open_base):
         ),
         "net_contract": (pbs[-1] < pbs[0]) if len(pbs) >= 2 else None,
         "vol_dryup": float(vol_recent / vol_base) if vol_base > 0 else np.nan,
-        "pct_below_pivot": float(px / open_base["peak_val"] - 1),
-        "above_SMA50": bool(px > df["SMA50"].iloc[-1]),
-        "pos_in_base": float(
-            (px - open_base["trough"]) / (open_base["peak_val"] - open_base["trough"])
-        )
-        if open_base["peak_val"] > open_base["trough"]
-        else np.nan,
-    }
+    })
+    return out
 
 
 # ====================================================================
@@ -726,8 +742,12 @@ def build_rows(panel):
                    tier=None, hard_fails="", quality_score=None)
         if ob is not None:
             m = base_metrics(res["sub"], ob)
-            q = quality_flags(m, ob["depth"], QUAL["max_quality_depth"],
-                              QUAL["range_max"], QUAL["vol_max"])
+            # A base only a few sessions old cannot be judged on range or volume
+            # contraction. Leave tier as None rather than stamping it FAIL for
+            # having no history yet.
+            q = (quality_flags(m, ob["depth"], QUAL["max_quality_depth"],
+                               QUAL["range_max"], QUAL["vol_max"])
+                 if m.get("assessable") else None)
             row.update(
                 base_start=str(ob["start_date"].date()), base_len=int(ob["length"]),
                 depth_pct=round(ob["depth"] * 100, 1),
@@ -741,10 +761,12 @@ def build_rows(panel):
                            else round(m["vol_dryup"], 2)),
                 pos_in_base=(None if not np.isfinite(m["pos_in_base"])
                              else round(m["pos_in_base"], 2)),
-                len_ok=bool(ob["qualifies_len"]), depth_ok=bool(ob["qualifies_depth"]),
-                tier=q["tier"], hard_fails=q["hard_fails"],
-                quality_score=int(q["quality_score"]),
-                flags={k: bool(q[k]) for k in ALL_FLAGS})
+                len_ok=bool(ob["qualifies_len"]),
+                depth_ok=bool(ob["qualifies_depth"]))
+            if q is not None:
+                row.update(tier=q["tier"], hard_fails=q["hard_fails"],
+                           quality_score=int(q["quality_score"]),
+                           flags={k: bool(q[k]) for k in ALL_FLAGS})
         rows[s] = row
     return rows
 
@@ -765,6 +787,8 @@ def base_candidates(rows, target=2):
         if r["turnover_cr"] < MIN_TURNOVER_CR:
             continue
         if (r["rs_long"] or 0) < BASE_RS_MIN:
+            continue
+        if r.get("tier") is None:          # too young to assess
             continue
         out.append(r)
     order = {"PASS": 0, "NEAR": 1, "FAIL": 2}
