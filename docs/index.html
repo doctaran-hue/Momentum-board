@@ -175,6 +175,28 @@ nav{display:flex; gap:2px; margin:22px 0 0; flex-wrap:wrap}
 .sec .g{position:relative;height:4px;background:var(--rule2);border-radius:2px}
 .sec .g i{position:absolute;inset:0 auto 0 0;background:var(--ink);border-radius:2px}
 
+/* breadth */
+.bgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));
+  border-bottom:1px solid var(--rule)}
+.bcell{padding:11px 14px;border-right:1px solid var(--rule2)}
+.bcell:last-child{border-right:0}
+.bcell .k{font-family:var(--cond);font-size:9.5px;font-weight:600;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--ink3)}
+.bcell .v{font-family:var(--mono);font-size:19px;font-weight:500;margin-top:2px;
+  font-variant-numeric:tabular-nums}
+.bcell .v small{font-size:11px;color:var(--ink3)}
+.bcell .v.p{color:var(--pass)} .bcell .v.n{color:var(--fail)}
+.chartwrap{padding:14px 14px 4px}
+.chartwrap h4{font-family:var(--cond);font-size:11px;font-weight:600;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--ink3);margin:0 0 6px}
+.chartwrap svg{width:100%;height:auto;display:block}
+.lg{display:flex;gap:14px;flex-wrap:wrap;font-family:var(--mono);font-size:10.5px;
+  color:var(--ink2);margin:5px 0 16px}
+.lg i{display:inline-block;width:16px;height:2px;vertical-align:middle;margin-right:5px}
+.lagnote{padding:0 14px 16px;font-size:12.5px;color:var(--ink2);max-width:74ch}
+.lagnote table{border-collapse:collapse;margin:9px 0;font-family:var(--mono);font-size:11.5px}
+.lagnote td{padding:2px 14px 2px 0;border-bottom:1px solid var(--rule2)}
+
 /* detail */
 .detail{background:#F7F9FA;border-bottom:1px solid var(--rule);padding:12px 14px 14px 38px;
   display:none}
@@ -244,7 +266,8 @@ const F = {
   rs_pos:   {label:"All RS+",  desc:"Every stock with positive excess RS, no proximity filter. Fake movers excluded."},
   base:     {label:"Base",     desc:"Structurally the target base, sorted by whether the geometry agrees with the count."},
   new:      {label:"New today",desc:"Entered any list on this run. Read this first."},
-  sectors:  {label:"Sectors",  desc:"Sector counts across the RS-positive set. Share of the sector matters more than the raw count."}
+  sectors:  {label:"Sectors",  desc:"Sector counts across the RS-positive set. Share of the sector matters more than the raw count."},
+  breadth:  {label:"Breadth",  desc:"Three constructions that lag by different amounts. Levels for the regime, the oscillator for warning, the AD line for divergence only."}
 };
 let DATA=null, TAB="new", OPEN=null;
 
@@ -413,6 +436,108 @@ function csvExport(){
   a.click(); URL.revokeObjectURL(a.href);
 }
 
+function svgLine(series, opts){
+  // series: [{v:[...], color, width, dash}] sharing one x axis
+  const W=760, H=opts.h||120, P={t:8,r:8,b:16,l:38};
+  const all=[].concat(...series.map(s=>s.v.filter(x=>x!=null&&isFinite(x))));
+  if(!all.length) return "";
+  let lo=Math.min(...all), hi=Math.max(...all);
+  if(opts.zero){ lo=Math.min(lo,0); hi=Math.max(hi,0); }
+  if(opts.min!=null) lo=Math.min(lo,opts.min);
+  if(opts.max!=null) hi=Math.max(hi,opts.max);
+  if(hi===lo){ hi=lo+1; }
+  const n=series[0].v.length;
+  const X=i=>P.l+(W-P.l-P.r)*(n<2?0:i/(n-1));
+  const Y=v=>P.t+(H-P.t-P.b)*(1-(v-lo)/(hi-lo));
+  const path=s=>s.v.map((v,i)=>(v==null||!isFinite(v))?null:`${i?"L":"M"}${X(i).toFixed(1)} ${Y(v).toFixed(1)}`)
+                    .filter(Boolean).join(" ");
+  let g="";
+  (opts.guides||[]).forEach(gv=>{
+    if(gv<lo||gv>hi) return;
+    g+=`<line x1="${P.l}" x2="${W-P.r}" y1="${Y(gv).toFixed(1)}" y2="${Y(gv).toFixed(1)}"
+      stroke="var(--rule)" stroke-width="1" stroke-dasharray="3 3"/>
+      <text x="${P.l-5}" y="${(Y(gv)+3.5).toFixed(1)}" text-anchor="end"
+      font-family="var(--mono)" font-size="9" fill="var(--ink3)">${gv}</text>`;
+  });
+  const ticks=[lo,hi].map(v=>`<text x="${P.l-5}" y="${(Y(v)+3.5).toFixed(1)}"
+    text-anchor="end" font-family="var(--mono)" font-size="9"
+    fill="var(--ink3)">${Math.round(v)}</text>`).join("");
+  const lines=series.map(s=>`<path d="${path(s)}" fill="none" stroke="${s.color}"
+    stroke-width="${s.width||1.4}" ${s.dash?`stroke-dasharray="${s.dash}"`:""}
+    stroke-linejoin="round"/>`).join("");
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(opts.label||"")}">
+    ${g}${opts.guides?"":ticks}${lines}</svg>`;
+}
+
+function breadthBoard(){
+  const b = DATA.breadth;
+  if(!b) return `<div class="empty"><b>No breadth data.</b>
+    Needs at least 20 symbols and 260 sessions of history.</div>`;
+  const s=b.series||{};
+  const sign=v=>v>0?"p":v<0?"n":"";
+  const cells=[
+    ["% above 200-DMA", `${n(b.pct_above_200,1)}<small>%</small>`, sign(b.pct_above_200-50)],
+    ["21-day change", `${b.pct_above_200_delta>0?"+":""}${n(b.pct_above_200_delta,1)}<small> pp</small>`, sign(b.pct_above_200_delta)],
+    ["% above 50-DMA", `${n(b.pct_above_50,1)}<small>%</small>`, sign(b.pct_above_50-50)],
+    ["McClellan", `${b.mcclellan>0?"+":""}${n(b.mcclellan,1)}`, sign(b.mcclellan)],
+    ["net new highs", `${b.net_new_highs>0?"+":""}${b.net_new_highs}`, sign(b.net_new_highs)],
+    ["adv / dec", `${b.advances}<small> / ${b.declines}</small>`, sign(b.net_ratio)],
+    ["state", `<span style="font-family:var(--cond);font-weight:700;font-size:13px">${esc(b.state)}</span>`, ""],
+    ["AD divergence", `<span style="font-family:var(--cond);font-weight:700;font-size:13px">${esc((b.divergence||"—").toUpperCase())}</span>`,
+      b.divergence==="negative"?"n":b.divergence==="positive"?"p":""],
+  ].map(([k,v,c])=>`<div class="bcell"><div class="k">${esc(k)}</div>
+      <div class="v ${c}">${v}</div></div>`).join("");
+
+  let charts = "";
+  if(s.pct200 && s.pct200.length>10){
+    charts += `<div class="chartwrap"><h4>% of universe above its own 200-DMA</h4>
+      ${svgLine([{v:s.pct200,color:"var(--ink)"}],
+        {h:130,guides:[20,40,60,80],min:0,max:100,label:"percent above 200 day average"})}
+      <div class="lg"><span><i style="background:var(--ink)"></i>% above 200-DMA</span>
+        <span>dashed lines at 20 / 40 / 60 / 80</span></div></div>`;
+  }
+  if(s.mcc && s.mcc.length>10){
+    charts += `<div class="chartwrap"><h4>McClellan-style oscillator &mdash; the fast read</h4>
+      ${svgLine([{v:s.mcc,color:"var(--mark)"}],{h:110,zero:true,guides:[0],
+        label:"breadth oscillator"})}
+      <div class="lg"><span><i style="background:var(--mark)"></i>19-EMA minus 39-EMA of daily net advances</span>
+        <span>above zero = broadening</span></div></div>`;
+  }
+  if(s.ad && s.ad.length>10){
+    charts += `<div class="chartwrap"><h4>Advance-decline line and its 20-EMA &mdash; context, not a trigger</h4>
+      ${svgLine([{v:s.ad,color:"var(--ink2)"},
+                 {v:s.ad_ema,color:"var(--fail)",width:1.6,dash:"4 3"}],
+        {h:130,label:"cumulative advance decline line"})}
+      <div class="lg"><span><i style="background:var(--ink2)"></i>AD line</span>
+        <span><i style="background:var(--fail)"></i>20-EMA</span>
+        <span>5-day slope ${b.ad_ema20_slope5>0?"+":""}${n(b.ad_ema20_slope5,0)}</span></div></div>`;
+  }
+
+  const note = `<div class="lagnote">
+    <b>On the 20-EMA bend as a trigger.</b> Tested on a synthetic panel with an
+    engineered top, applying an identical slope-turn rule to every series:
+    <table>
+      <tr><td>McClellan oscillator</td><td>0 bars after the top</td></tr>
+      <tr><td>% above own 50-DMA</td><td>0</td></tr>
+      <tr><td>AD line (raw)</td><td>3</td></tr>
+      <tr><td>% above own 200-DMA</td><td>9</td></tr>
+      <tr><td>AD line 20-EMA</td><td>10 &mdash; slowest of the five</td></tr>
+    </table>
+    The cumulative AD line is an integral, so smoothing it and waiting for the
+    slope to bend stacks two lags. About ten sessions here, not weeks &mdash; but
+    it is last, every time. Slow is acceptable for a regime gate, where you do
+    not want to flip in and out; it is not what you want for a warning.
+    Read the oscillator and the 50-DMA line for that, and use the AD line for
+    divergence against the index instead of its own slope.
+    <br><br>
+    One caveat that matters: the panel is today&rsquo;s constituent list, so a
+    cumulative AD line computed back over years is biased upward &mdash; the names
+    that were delisted are missing. That distortion compounds in a cumulative
+    series and barely touches the point-in-time percentages.
+  </div>`;
+  return `<div class="bgrid">${cells}</div>${charts}${note}`;
+}
+
 function sectorBoard(){
   const s = DATA.sectors||[];
   if(!s.length) return `<div class="empty"><b>No sector data.</b>
@@ -437,6 +562,11 @@ function sectorBoard(){
 }
 
 function board(){
+  if(TAB==="breadth"){
+    const b=document.getElementById("board");
+    b.innerHTML = `<div class="note">${esc(F.breadth.desc)}</div>` + breadthBoard();
+    return;
+  }
   if(TAB==="sectors"){
     const b=document.getElementById("board");
     b.innerHTML = `<div class="note">${esc(F.sectors.desc)}</div>` + sectorBoard();
