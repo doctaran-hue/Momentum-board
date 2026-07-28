@@ -175,6 +175,27 @@ nav{display:flex; gap:2px; margin:22px 0 0; flex-wrap:wrap}
 .sec .g{position:relative;height:4px;background:var(--rule2);border-radius:2px}
 .sec .g i{position:absolute;inset:0 auto 0 0;background:var(--ink);border-radius:2px}
 
+/* breadth MA table */
+.mtab{display:grid;grid-template-columns:76px 62px 56px 56px 56px 56px 1fr;
+  gap:0 10px;padding:0 14px;align-items:center;border-bottom:1px solid var(--rule2)}
+.mtab.h{font-family:var(--cond);font-size:9.5px;font-weight:600;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--ink3);background:#F7F9FA;
+  border-bottom:1px solid var(--rule)}
+.mtab>*{padding:9px 0}
+.mtab .ma{font-family:var(--cond);font-weight:700;font-size:13px}
+.mtab .big{font-family:var(--mono);font-size:15px;font-weight:600;text-align:right;
+  font-variant-numeric:tabular-nums}
+.mtab .d{font-family:var(--mono);font-size:12px;text-align:right;
+  font-variant-numeric:tabular-nums}
+.mtab .d.p{color:var(--pass)} .mtab .d.n{color:var(--fail)}
+.rng{position:relative;height:16px}
+.rng .track{position:absolute;top:7px;left:0;right:0;height:2px;background:var(--rule2)}
+.rng .band{position:absolute;top:5px;height:6px;background:var(--rule);border-radius:1px}
+.rng .med{position:absolute;top:2px;width:1px;height:12px;background:var(--ink3)}
+.rng .dot{position:absolute;top:3px;width:9px;height:9px;border-radius:50%;
+  background:var(--ink);margin-left:-4px;border:1.5px solid var(--card)}
+.rng .lbl{position:absolute;top:0;font-family:var(--mono);font-size:9px;color:var(--ink3)}
+
 /* breadth */
 .bgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));
   border-bottom:1px solid var(--rule)}
@@ -469,42 +490,86 @@ function svgLine(series, opts){
     ${g}${opts.guides?"":ticks}${lines}</svg>`;
 }
 
+function rangeBar(st){
+  if(st.p10==null||st.p90==null) return `<div class="rng"></div>`;
+  const lo=0, hi=100, X=v=>Math.max(0,Math.min(100,(v-lo)/(hi-lo)*100));
+  return `<div class="rng" title="10th-90th percentile of this reading's own last ${st.n_hist} sessions">
+    <div class="track"></div>
+    <div class="band" style="left:${X(st.p10)}%;width:${Math.max(1,X(st.p90)-X(st.p10))}%"></div>
+    <div class="med" style="left:${X(st.p50)}%"></div>
+    <div class="dot" style="left:${X(st.pct)}%"></div>
+    <div class="lbl" style="left:0">0</div>
+    <div class="lbl" style="right:0">100</div>
+  </div>`;
+}
+
+function maTable(b){
+  const rows=(b.ma_table||[]).map(m=>{
+    const sg=v=>v==null?"":v>0?"p":v<0?"n":"";
+    const f=v=>v==null?"–":(v>0?"+":"")+n(v,0);
+    return `<div class="mtab">
+      <div class="ma">${m.span} EMA</div>
+      <div class="big">${n(m.pct,1)}<span style="font-size:10px;color:var(--ink3)">%</span></div>
+      <div class="d ${sg(m.d5)}">${f(m.d5)}</div>
+      <div class="d ${sg(m.d21)}">${f(m.d21)}</div>
+      <div class="d ${sg(m.d63)}">${f(m.d63)}</div>
+      <div class="d">${m.pctile!=null?"p"+n(m.pctile,0):"–"}</div>
+      ${rangeBar(m)}
+    </div>`;
+  }).join("");
+  return `<div class="mtab h"><div>&nbsp;</div>
+    <div style="text-align:right">% above</div>
+    <div style="text-align:right">5d</div>
+    <div style="text-align:right">21d</div>
+    <div style="text-align:right">63d</div>
+    <div style="text-align:right">pctile</div>
+    <div>own 3-year range &nbsp;<span style="text-transform:none;letter-spacing:0">(bar = 10th\u201390th, tick = median, dot = today)</span></div>
+  </div>${rows}`;
+}
+
 function breadthBoard(){
   const b = DATA.breadth;
   if(!b) return `<div class="empty"><b>No breadth data.</b>
     Needs at least 20 symbols and 260 sessions of history.</div>`;
   const s=b.series||{};
   const sign=v=>v>0?"p":v<0?"n":"";
+  const mst=b.mcclellan_stats||{};
+
   const cells=[
-    ["% above 200-DMA", `${n(b.pct_above_200,1)}<small>%</small>`, sign(b.pct_above_200-50)],
-    ["21-day change", `${b.pct_above_200_delta>0?"+":""}${n(b.pct_above_200_delta,1)}<small> pp</small>`, sign(b.pct_above_200_delta)],
-    ["% above 50-DMA", `${n(b.pct_above_50,1)}<small>%</small>`, sign(b.pct_above_50-50)],
+    ["state", `<span style="font-family:var(--cond);font-weight:700;font-size:13px">${esc(b.state)}</span>`, ""],
     ["McClellan", `${b.mcclellan>0?"+":""}${n(b.mcclellan,1)}`, sign(b.mcclellan)],
+    ["McClellan pctile", mst.pctile!=null?"p"+n(mst.pctile,0):"–", ""],
     ["net new highs", `${b.net_new_highs>0?"+":""}${b.net_new_highs}`, sign(b.net_new_highs)],
     ["adv / dec", `${b.advances}<small> / ${b.declines}</small>`, sign(b.net_ratio)],
-    ["state", `<span style="font-family:var(--cond);font-weight:700;font-size:13px">${esc(b.state)}</span>`, ""],
-    ["AD divergence", `<span style="font-family:var(--cond);font-weight:700;font-size:13px">${esc((b.divergence||"—").toUpperCase())}</span>`,
+    ["AD divergence", `<span style="font-family:var(--cond);font-weight:700;font-size:13px">${esc((b.divergence||"\u2014").toUpperCase())}</span>`,
       b.divergence==="negative"?"n":b.divergence==="positive"?"p":""],
   ].map(([k,v,c])=>`<div class="bcell"><div class="k">${esc(k)}</div>
       <div class="v ${c}">${v}</div></div>`).join("");
 
-  let charts = "";
-  if(s.pct200 && s.pct200.length>10){
-    charts += `<div class="chartwrap"><h4>% of universe above its own 200-DMA</h4>
-      ${svgLine([{v:s.pct200,color:"var(--ink)"}],
-        {h:130,guides:[20,40,60,80],min:0,max:100,label:"percent above 200 day average"})}
-      <div class="lg"><span><i style="background:var(--ink)"></i>% above 200-DMA</span>
-        <span>dashed lines at 20 / 40 / 60 / 80</span></div></div>`;
+  let charts="";
+  if(s.e200 && s.e200.length>10){
+    charts += `<div class="chartwrap"><h4>% of universe above its own EMA \u2014 all three</h4>
+      ${svgLine([{v:s.e20,color:"var(--mark)",width:1.1},
+                 {v:s.e50,color:"var(--near)",width:1.2},
+                 {v:s.e200,color:"var(--ink)",width:1.7}],
+        {h:170,guides:[20,40,50,60,80],min:0,max:100,label:"percent above moving averages"})}
+      <div class="lg"><span><i style="background:var(--mark)"></i>20 EMA (fast)</span>
+        <span><i style="background:var(--near)"></i>50 EMA</span>
+        <span><i style="background:var(--ink)"></i>200 EMA (regime)</span>
+        <span>the 20 turns first; the 200 confirms</span></div></div>`;
   }
   if(s.mcc && s.mcc.length>10){
-    charts += `<div class="chartwrap"><h4>McClellan-style oscillator &mdash; the fast read</h4>
-      ${svgLine([{v:s.mcc,color:"var(--mark)"}],{h:110,zero:true,guides:[0],
-        label:"breadth oscillator"})}
+    const bands=[];
+    if(mst.p10!=null) bands.push(mst.p10, mst.p90);
+    charts += `<div class="chartwrap"><h4>McClellan-style oscillator \u2014 the fast read</h4>
+      ${svgLine([{v:s.mcc,color:"var(--mark)"}],
+        {h:120,zero:true,guides:[0].concat(bands),label:"breadth oscillator"})}
       <div class="lg"><span><i style="background:var(--mark)"></i>19-EMA minus 39-EMA of daily net advances</span>
-        <span>above zero = broadening</span></div></div>`;
+        ${mst.p10!=null?`<span>dashed bands = own 10th (${n(mst.p10,0)}) and 90th (${n(mst.p90,0)}) percentile</span>`:""}
+      </div></div>`;
   }
   if(s.ad && s.ad.length>10){
-    charts += `<div class="chartwrap"><h4>Advance-decline line and its 20-EMA &mdash; context, not a trigger</h4>
+    charts += `<div class="chartwrap"><h4>Advance-decline line and its 20-EMA \u2014 context, not a trigger</h4>
       ${svgLine([{v:s.ad,color:"var(--ink2)"},
                  {v:s.ad_ema,color:"var(--fail)",width:1.6,dash:"4 3"}],
         {h:130,label:"cumulative advance decline line"})}
@@ -514,8 +579,14 @@ function breadthBoard(){
   }
 
   const note = `<div class="lagnote">
-    <b>On the 20-EMA bend as a trigger.</b> Tested on a synthetic panel with an
-    engineered top, applying an identical slope-turn rule to every series:
+    <b>Reading the table.</b> The percentile column and the range bar say where
+    today sits in this series&rsquo; own history, which is the only honest way to
+    call a reading extreme. High breadth is <em>not</em> a sell signal: pushes
+    above 80% are usually thrusts that begin advances. Tops form on
+    <em>divergence</em> \u2014 the index grinding higher while the percentages fall.
+    <br><br>
+    <b>On the 20-EMA bend of the AD line as a trigger.</b> Tested on a synthetic
+    panel with an engineered top, identical slope-turn rule on every series:
     <table>
       <tr><td>McClellan oscillator</td><td>0 bars after the top</td></tr>
       <tr><td>% above own 50-DMA</td><td>0</td></tr>
@@ -524,18 +595,19 @@ function breadthBoard(){
       <tr><td>AD line 20-EMA</td><td>10 &mdash; slowest of the five</td></tr>
     </table>
     The cumulative AD line is an integral, so smoothing it and waiting for the
-    slope to bend stacks two lags. About ten sessions here, not weeks &mdash; but
-    it is last, every time. Slow is acceptable for a regime gate, where you do
-    not want to flip in and out; it is not what you want for a warning.
-    Read the oscillator and the 50-DMA line for that, and use the AD line for
-    divergence against the index instead of its own slope.
+    slope to bend stacks two lags. Ten sessions here, not weeks &mdash; but last,
+    every time. Slow is fine for a regime gate; it is not what you want for a
+    warning. Use the 20-EMA row and the oscillator for that, and the AD line for
+    divergence against the index rather than its own slope.
     <br><br>
-    One caveat that matters: the panel is today&rsquo;s constituent list, so a
-    cumulative AD line computed back over years is biased upward &mdash; the names
-    that were delisted are missing. That distortion compounds in a cumulative
-    series and barely touches the point-in-time percentages.
+    Two caveats. The oscillator is built on the net-advance <em>ratio</em>, not
+    the published ratio-adjusted construction, so the textbook &plusmn;100 levels
+    do not apply &mdash; use the percentile bands instead. And the panel is
+    today&rsquo;s constituent list, so a cumulative AD line running back years is
+    biased upward; that compounds in a cumulative series and barely touches the
+    point-in-time percentages.
   </div>`;
-  return `<div class="bgrid">${cells}</div>${charts}${note}`;
+  return `${maTable(b)}<div class="bgrid">${cells}</div>${charts}${note}`;
 }
 
 function sectorBoard(){
