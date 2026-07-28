@@ -878,27 +878,26 @@ def trend_label(delta_pp, band=None):
     return "FLAT"
 
 
-def breadth(panel, bench=None, hist=250):
+def breadth(panel, bench=None, hist=250, pctile_window=756):
     """
-    Market breadth from the panel itself, in three constructions that lag by
-    different amounts.
+    Market breadth from the panel itself, in constructions that lag differently.
 
-      pct_above_200 / _50  - a LEVEL. Turns the day stocks cross. No lag beyond
-                             the moving average itself.
-      mcclellan            - 19-EMA minus 39-EMA of the daily net-advance ratio.
-                             Differencing two EMAs of the DAILY series, so no
-                             cumulation and no integration lag.
-      ad_line + ad_ema20   - the cumulative advance-decline line and its 20 EMA.
-                             Included for context and divergence, NOT as a
-                             trigger: it is an integral, so waiting for the EMA
-                             slope to bend stacks two lags and fires well after
-                             a trailing stop would have exited.
+      pct above 20 / 50 / 200 EMA - LEVELS. Turn the day stocks cross. The 20
+                             leads, the 200 is the regime read.
+      mcclellan            - 19-EMA minus 39-EMA of the DAILY net-advance ratio.
+                             No cumulation, so no integration lag.
+      ad_line + ad_ema20   - cumulative AD line and its 20 EMA. Context and
+                             divergence only, NOT a trigger: it is an integral,
+                             so waiting for the smoothed slope to bend is last
+                             of everything, every time.
+
+    Every level also carries its own percentile and 10th/90th percentile over
+    the trailing pctile_window sessions, so "extreme" is defined by this data
+    rather than by a threshold borrowed from a different construction.
 
     Survivorship warning: the panel is today's constituent list, so a cumulative
-    AD line computed back over years is biased upward - the losers that were
-    delisted are missing. That distortion compounds in a cumulative series and
-    barely touches the point-in-time percentages, which is another reason to
-    read the levels rather than the line.
+    AD line computed back over years is biased upward. That compounds in a
+    cumulative series and barely touches the point-in-time percentages.
     """
     if not panel:
         return None
@@ -906,20 +905,22 @@ def breadth(panel, bench=None, hist=250):
     if close.shape[1] < 20 or len(close) < 260:
         return None
 
-    sma200 = close.rolling(200).mean()
-    sma50 = close.rolling(50).mean()
-    n200 = (close > sma200).sum(axis=1)
-    d200 = sma200.notna().sum(axis=1)
-    n50 = (close > sma50).sum(axis=1)
-    d50 = sma50.notna().sum(axis=1)
-    pct200 = (100.0 * n200 / d200.replace(0, np.nan)).dropna()
-    pct50 = (100.0 * n50 / d50.replace(0, np.nan)).dropna()
+    def pct_above_ema(span):
+        ema = close.ewm(span=span, adjust=False).mean()
+        # require at least `span` observations before trusting a column
+        valid = close.notna().cumsum() >= span
+        num = ((close > ema) & valid).sum(axis=1)
+        den = valid.sum(axis=1)
+        return (100.0 * num / den.replace(0, np.nan)).dropna()
+
+    spans = (20, 50, 200)
+    pct = {sp: pct_above_ema(sp) for sp in spans}
 
     chg = close.pct_change()
     adv = (chg > 0).sum(axis=1)
     dec = (chg < 0).sum(axis=1)
     part = (adv + dec).replace(0, np.nan)
-    net_ratio = ((adv - dec) / part * 100).dropna()          # daily, not cumulated
+    net_ratio = ((adv - dec) / part * 100).dropna()
     ad_line = (adv - dec).cumsum().astype(float)
     ad_ema = ad_line.ewm(span=20, adjust=False).mean()
     mcc = (net_ratio.ewm(span=19, adjust=False).mean()
@@ -927,53 +928,77 @@ def breadth(panel, bench=None, hist=250):
 
     hi = close.rolling(252).max()
     lo = close.rolling(252).min()
-    nh = (close >= hi).sum(axis=1)
-    nl = (close <= lo).sum(axis=1)
-    net_hl = (nh - nl).dropna()
+    net_hl = ((close >= hi).sum(axis=1) - (close <= lo).sum(axis=1)).dropna()
 
-    def at(series, back=0):
-        if len(series) <= back:
-            return np.nan
-        return float(series.iloc[-1 - back])
+    def at(sr, back=0):
+        return np.nan if len(sr) <= back else float(sr.iloc[-1 - back])
 
-    # Divergence: index at a 60-day high while the AD line is not.
+    def stats(sr):
+        cur = at(sr)
+        win = sr.iloc[-pctile_window:]
+        out = dict(pct=round(cur, 1),
+                   d5=None, d21=None, d63=None,
+                   pctile=None, p10=None, p50=None, p90=None,
+                   n_hist=int(len(win)))
+        for k, b in (("d5", 5), ("d21", 21), ("d63", 63)):
+            v = at(sr, b)
+            if np.isfinite(v) and np.isfinite(cur):
+                out[k] = round(cur - v, 1)
+        if len(win) >= 60 and np.isfinite(cur):
+            out["pctile"] = round(float((win < cur).mean() * 100), 0)
+            out["p10"] = round(float(win.quantile(0.10)), 1)
+            out["p50"] = round(float(win.quantile(0.50)), 1)
+            out["p90"] = round(float(win.quantile(0.90)), 1)
+        return out
+
+    ma_table = []
+    for sp in spans:
+        st = stats(pct[sp])
+        st["span"] = sp
+        st["state"] = ("expanding" if (st["d21"] or 0) > 3
+                       else "contracting" if (st["d21"] or 0) < -3 else "flat")
+        ma_table.append(st)
+
+    mcc_st = stats(mcc)
+
     diverg = None
     if bench is not None:
         bc = bench["Close"]
         idx = bc.index.intersection(ad_line.index)
         if len(idx) > 70:
-            b = bc.reindex(idx)
-            a = ad_line.reindex(idx)
+            b = bc.reindex(idx); a = ad_line.reindex(idx)
             b_hi = bool(b.iloc[-1] >= b.iloc[-60:].max())
             a_hi = bool(a.iloc[-1] >= a.iloc[-60:].max())
             diverg = ("negative" if (b_hi and not a_hi)
-                      else "positive" if (a_hi and not b_hi)
-                      else "none")
+                      else "positive" if (a_hi and not b_hi) else "none")
 
-    tail = lambda s: [round(float(x), 2) for x in s.iloc[-hist:]]
-    dates = [str(d.date()) for d in pct200.index[-hist:]]
-
-    p200, p200_21 = at(pct200), at(pct200, 21)
-    slope = (at(ad_ema) - at(ad_ema, 5))
+    base_idx = pct[200].index
+    tail = lambda sr: [round(float(x), 2) for x in
+                       sr.reindex(base_idx).ffill().iloc[-hist:]]
+    p200 = at(pct[200])
+    slope = at(ad_ema) - at(ad_ema, 5)
     return dict(
+        ma_table=ma_table,
         pct_above_200=round(p200, 1),
-        pct_above_200_21d=round(p200_21, 1) if np.isfinite(p200_21) else None,
-        pct_above_200_delta=(round(p200 - p200_21, 1)
-                             if np.isfinite(p200) and np.isfinite(p200_21) else None),
-        pct_above_50=round(at(pct50), 1),
+        pct_above_200_21d=(round(at(pct[200], 21), 1)
+                           if np.isfinite(at(pct[200], 21)) else None),
+        pct_above_200_delta=ma_table[2]["d21"],
+        pct_above_50=round(at(pct[50]), 1),
+        pct_above_20=round(at(pct[20]), 1),
         advances=int(at(adv)), declines=int(at(dec)),
         net_ratio=round(at(net_ratio), 1),
-        mcclellan=round(at(mcc), 1),
-        mcclellan_21d=round(at(mcc, 21), 1),
+        mcclellan=round(at(mcc), 1), mcclellan_21d=round(at(mcc, 21), 1),
+        mcclellan_stats=mcc_st,
         net_new_highs=int(at(net_hl)),
         ad_ema20_slope5=round(slope, 1),
         ad_ema20_falling=bool(slope < 0),
         divergence=diverg,
-        state=("EXPANDING" if p200 >= 60 else "MIXED" if p200 >= 40 else "CONTRACTING"),
-        series=dict(dates=dates, pct200=tail(pct200),
-                    ad=tail(ad_line.reindex(pct200.index).ffill()),
-                    ad_ema=tail(ad_ema.reindex(pct200.index).ffill()),
-                    mcc=tail(mcc.reindex(pct200.index).ffill())),
+        state=("EXPANDING" if p200 >= 60 else "MIXED" if p200 >= 40
+               else "CONTRACTING"),
+        series=dict(
+            dates=[str(d.date()) for d in base_idx[-hist:]],
+            e20=tail(pct[20]), e50=tail(pct[50]), e200=tail(pct[200]),
+            ad=tail(ad_line), ad_ema=tail(ad_ema), mcc=tail(mcc)),
     )
 
 
@@ -1556,8 +1581,11 @@ def main():
           f"FAIL {tiers.get('FAIL',0)})")
     print(f"  confound      : {confound.get('verdict')}")
     if brd:
-        print(f"  breadth       : {brd['pct_above_200']}% above own 200-DMA "
-              f"({brd['pct_above_200_delta']:+.1f} pp in 21d) -> {brd['state']}")
+        print("  breadth       : " + "  ".join(
+            f"{m['span']}EMA {m['pct']}%"
+            + (f"({m['d21']:+.0f})" if m['d21'] is not None else "")
+            + (f"[p{m['pctile']:.0f}]" if m['pctile'] is not None else "")
+            for m in brd['ma_table']) + f"  -> {brd['state']}")
         print(f"  mcclellan     : {brd['mcclellan']}  (21d ago "
               f"{brd['mcclellan_21d']})   net new highs {brd['net_new_highs']:+d}")
         print(f"  AD line       : 20-EMA 5d slope {brd['ad_ema20_slope5']:+.0f}"
